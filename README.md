@@ -26,8 +26,7 @@ python -m sleeper_dossier.cli --league YOUR_LEAGUE_ID
 # A specific month, written as a shareable HTML page
 python -m sleeper_dossier.cli --league YOUR_LEAGUE_ID --month 2025-10 --html oct.html
 
-# A specific week's recap — power ranking, luck index, median what-if,
-# rivalry head-to-head per matchup
+# A single week's recap — that week's awards, standings-to-date, and luck leaderboard
 python -m sleeper_dossier.cli --league YOUR_LEAGUE_ID --week 5 --html week5.html
 
 # End-of-season review
@@ -35,9 +34,6 @@ python -m sleeper_dossier.cli --league YOUR_LEAGUE_ID --season --html review.htm
 
 # Generate a PDF (requires: pip install playwright && playwright install chromium)
 python -m sleeper_dossier.cli --league YOUR_LEAGUE_ID --week 5 --pdf week5.pdf
-
-# Screenshot every award card and chart as individual PNGs (e.g. for a website)
-python -m sleeper_dossier.cli --league YOUR_LEAGUE_ID --week 5 --assets assets/week5
 
 # Manager-of-the-Month history so far
 python -m sleeper_dossier.cli --league YOUR_LEAGUE_ID --history
@@ -83,6 +79,54 @@ python -m sleeper_dossier.batch --csv leagues.csv --season
 ```
 
 Email requires: `SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM`.
+
+### Sourcing the league list from a Google Sheet
+
+`--sheet SHEET_ID` reads the same list from a Google Sheet instead of a CSV
+(`sheet.py`), with columns `Date, email, league_id, Teir`:
+
+```bash
+python -m sleeper_dossier.batch --sheet 1QZ-vewj...Y2k --week latest --email
+```
+
+Setup (one-time):
+1. Google Cloud Console → create a project (if you don't have one) → **IAM & Admin
+   → Service Accounts** → create a service account → **Keys** → Add key → JSON.
+   Download the key file.
+2. Open the sheet's Share dialog and add the service account's email
+   (`...@...iam.gserviceaccount.com`, from the JSON key) as **Viewer**.
+3. Set `GOOGLE_SHEETS_CREDENTIALS=/path/to/key.json` before running.
+
+`--week latest` resolves to each league's most recently completed week — this
+is what the scheduled automation uses (see below).
+
+### Free trial (`Teir` column)
+
+A row with `Teir` = `free` gets the **full-tier report** for its first 14
+days after `Date` (any of `YYYY-MM-DD`, `DD/MM/YYYY`, `MM/DD/YYYY`), then
+drops to the free-tier report (award cards only). `normal`/`dynasty` rows are
+unaffected — the trial only ever upgrades a declared tier, never downgrades
+it. See `trial.py`.
+
+The tier also controls `render_html`'s `tier=` argument directly if you're
+calling it outside batch mode: `"free"` renders award cards + recap only;
+`"normal"`/`"dynasty"` render the full report (standings, charts, luck
+leaderboard, waiver/trades). Dynasty-specific features don't exist yet, so
+`"dynasty"` currently renders identically to `"normal"`.
+
+### Running it on a schedule
+
+`.github/workflows/dossier.yml` runs the batch weekly (Tuesdays, after MNF)
+via GitHub Actions. It needs these repo secrets (Settings → Secrets and
+variables → Actions):
+
+- `SHEET_ID` — the Google Sheet ID (the long string in its URL)
+- `GOOGLE_SHEETS_CREDENTIALS_JSON` — the full contents of the service account JSON key
+- `ANTHROPIC_API_KEY` — omit to send reports without the roast layer
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`
+
+Trigger a run manually from the Actions tab (`workflow_dispatch`) to test
+before waiting for the schedule.
 
 ## Architecture
 

@@ -60,7 +60,9 @@ def _sparkline(values: list) -> str:
     return "".join(_SPARK_CHARS[min(7, int((v - lo) / span * 7))] for v in values)
 
 
-def _relevant_weeks(season, month_stats) -> list:
+def _relevant_weeks(season, month_stats, weeks=None) -> list:
+    if weeks is not None:
+        return weeks
     if month_stats:
         any_team = next(iter(month_stats.values()), None)
         return any_team.weeks if any_team else []
@@ -90,7 +92,7 @@ def _closest_game(season, weeks: list):
 # ----------------------------------------------------------------------
 
 def render_text(season, awards, roasts, period_label, season_stats=None,
-                kind="monthly", month_stats=None, recap="", waiver_take=""):
+                kind="monthly", month_stats=None, recap="", waiver_take="", weeks=None):
     L = []
     header = f"{season.name} — {period_label}"
     L.append("=" * 64)
@@ -136,10 +138,14 @@ def render_text(season, awards, roasts, period_label, season_stats=None,
 
     # Standings: frozen at this period's last played week, not today's live
     # totals — a retrospective monthly report shouldn't show later weeks' results.
-    weeks = _relevant_weeks(season, month_stats)
-    upto_week = max(weeks) if month_stats else None
-    standings_label = "OVERALL STANDINGS  (final season)" if kind == "season" \
-        else "OVERALL STANDINGS  (through end of this month)"
+    weeks = _relevant_weeks(season, month_stats, weeks)
+    upto_week = max(weeks) if (month_stats or kind == "week") else None
+    if kind == "season":
+        standings_label = "OVERALL STANDINGS  (final season)"
+    elif kind == "week":
+        standings_label = f"OVERALL STANDINGS  (through week {upto_week})"
+    else:
+        standings_label = "OVERALL STANDINGS  (through end of this month)"
     L.append("\n" + "-" * 64)
     L.append(f"  {standings_label}")
     L.append("-" * 64)
@@ -421,10 +427,12 @@ def _card(season, a, roasts):
 
 
 def render_html(season, awards, roasts, period_label, season_stats=None,
-                kind="monthly", month_stats=None, recap="", waiver_take=""):
+                kind="monthly", month_stats=None, recap="", waiver_take="",
+                weeks=None, tier="normal"):
     fame = [a for a in awards if a.hall == "fame"]
     shame = [a for a in awards if a.hall == "shame"]
     title = period_label
+    full_report = tier != "free"
 
     recap_html = f'<div class="recap">{html.escape(recap)}</div>' if recap else ""
 
@@ -433,84 +441,97 @@ def render_html(season, awards, roasts, period_label, season_stats=None,
 
     # Standings table (with weekly-form sparkline column). Frozen at this
     # period's last played week for monthly reports, not today's live totals.
-    weeks = _relevant_weeks(season, month_stats)
-    upto_week = max(weeks) if month_stats else None
-    standings_heading = "Overall Standings &amp; Form (final season)" if kind == "season" \
-        else "Overall Standings &amp; Form (through end of this month)"
+    weeks = _relevant_weeks(season, month_stats, weeks)
+    upto_week = max(weeks) if (month_stats or kind == "week") else None
+    if kind == "season":
+        standings_heading = "Overall Standings &amp; Form (final season)"
+    elif kind == "week":
+        standings_heading = f"Overall Standings &amp; Form (through week {upto_week})"
+    else:
+        standings_heading = "Overall Standings &amp; Form (through end of this month)"
     st_rows = ""
-    for i, r in enumerate(standings_rows(season, upto_week), 1):
-        wl = f"{r['w']}-{r['l']}" + (f"-{r['ties']}" if r['ties'] else "")
-        scores = [season.weeks[wk][r["rid"]].points for wk in weeks if r["rid"] in season.weeks.get(wk, {})]
-        spark = html.escape(_sparkline(scores))
-        st_rows += (f"<tr><td>{i}</td><td>{html.escape(r['team'])}</td>"
-                    f"<td>{wl}</td><td class='num'>{r['pf']:.1f}</td>"
-                    f"<td class='num'>{r['pa']:.1f}</td><td class='spark'>{spark}</td></tr>")
-
     closest_html = ""
-    cg = _closest_game(season, weeks)
-    if cg:
-        margin, wk, ra, pa, rb, pb = cg
-        winner, loser = (ra, rb) if pa > pb else (rb, ra)
-        hi, lo = max(pa, pb), min(pa, pb)
-        closest_html = (f'<div class="closest"><strong>Closest race —</strong> '
-                        f'Week {wk}: {html.escape(season.team_name(winner))} beat '
-                        f'{html.escape(season.team_name(loser))} by just {margin:.1f} '
-                        f'({hi:.1f}–{lo:.1f})</div>')
-
     waiver_html = ""
-    if weeks:
-        best = W.best_pickup_period(season, weeks)
-        worst = W.worst_faab_period(season, weeks)
-        faab_totals = W.faab_spent_by_team(season, weeks)
-        trades = W.trades_in(season, weeks)
-        if best or worst or faab_totals or trades or waiver_take:
-            bits = []
-            if best:
-                spend = f"${best.faab}" if best.faab else "free"
-                bits.append(f'<p><strong>Best pickup:</strong> {html.escape(season.team_name(best.roster_id))} '
-                           f'added {html.escape(best.player_name)} ({spend}) → {best.points_since:.1f} pts since</p>')
-            if worst:
-                bits.append(f'<p><strong>Worst FAAB spend:</strong> {html.escape(season.team_name(worst.roster_id))} '
-                           f'paid ${worst.faab} for {html.escape(worst.player_name)} → {worst.points_since:.1f} pts since</p>')
-            if faab_totals:
-                top = sorted(faab_totals.items(), key=lambda kv: kv[1], reverse=True)[:3]
-                spend_str = ", ".join(f"{html.escape(season.team_name(rid))} (${amt})" for rid, amt in top)
-                bits.append(f"<p><strong>Top FAAB spend:</strong> {spend_str}</p>")
-            if trades:
-                trade_rows = "".join(f"<li>Week {t.week}: {html.escape(_format_trade(season, t))}</li>" for t in trades)
-                bits.append(f"<p><strong>Trades ({len(trades)}):</strong></p><ul>{trade_rows}</ul>")
-            if waiver_take:
-                bits.append(f'<p class="take">{html.escape(waiver_take)}</p>')
-            waiver_html = f"<h2>Waiver Wire &amp; Trades</h2>{''.join(bits)}"
-
     luck_html = ""
-    if season_stats:
-        rows = ""
-        for s in sorted(season_stats.values(), key=lambda x: x.luck_index, reverse=True):
-            cls = "lucky" if s.luck_index > 0 else ("robbed" if s.luck_index < 0 else "")
-            rows += (f"<tr><td>{html.escape(season.team_name(s.roster_id))}</td>"
-                     f"<td class='num {cls}'>{s.luck_index:+.1f}</td>"
-                     f"<td class='num'>{s.all_play_w}-{s.all_play_l}</td>"
-                     f"<td class='num'>{s.avg_efficiency:.0f}%</td></tr>")
-        luck_html = f"""<h2>The (Un)Lucky Leaderboard</h2>
-          <table><tr><th>Team</th><th>Luck (W vs deserved)</th>
-          <th>All-Play</th><th>Efficiency</th></tr>{rows}</table>"""
-
     month_html = ""
-    if month_stats:
-        rows = ""
-        for m in sorted(month_stats.values(), key=lambda x: x.pts_above_avg, reverse=True):
-            rank = f"{m.rank_start} → {m.rank_end}" if m.rank_start else f"→ {m.rank_end}"
-            rank_cls = "lucky" if m.climb > 0 else ("robbed" if m.climb < 0 else "")
-            aa_cls = "lucky" if m.pts_above_avg > 0 else "robbed"
-            rows += (f"<tr><td>{html.escape(season.team_name(m.roster_id))}</td>"
-                     f"<td class='num'>{m.h2h_w}-{m.h2h_l}</td>"
-                     f"<td class='num {aa_cls}'>{m.pts_above_avg:+.1f}</td>"
-                     f"<td class='num {rank_cls}'>{rank}</td>"
-                     f"<td class='num'>{m.avg_efficiency:.0f}%</td></tr>")
-        month_html = f"""<h2>The Month in Review (this month's standing, not season-to-date)</h2>
-          <table><tr><th>Team</th><th>Record</th><th>+/- vs Avg</th>
-          <th>Rank (start → end)</th><th>Efficiency</th></tr>{rows}</table>"""
+    charts_html = ""
+
+    if full_report:
+        for i, r in enumerate(standings_rows(season, upto_week), 1):
+            wl = f"{r['w']}-{r['l']}" + (f"-{r['ties']}" if r['ties'] else "")
+            scores = [season.weeks[wk][r["rid"]].points for wk in weeks if r["rid"] in season.weeks.get(wk, {})]
+            spark = html.escape(_sparkline(scores))
+            st_rows += (f"<tr><td>{i}</td><td>{html.escape(r['team'])}</td>"
+                        f"<td>{wl}</td><td class='num'>{r['pf']:.1f}</td>"
+                        f"<td class='num'>{r['pa']:.1f}</td><td class='spark'>{spark}</td></tr>")
+
+        cg = _closest_game(season, weeks)
+        if cg:
+            margin, wk, ra, pa, rb, pb = cg
+            winner, loser = (ra, rb) if pa > pb else (rb, ra)
+            hi, lo = max(pa, pb), min(pa, pb)
+            closest_html = (f'<div class="closest"><strong>Closest race —</strong> '
+                            f'Week {wk}: {html.escape(season.team_name(winner))} beat '
+                            f'{html.escape(season.team_name(loser))} by just {margin:.1f} '
+                            f'({hi:.1f}–{lo:.1f})</div>')
+
+        charts_html = _charts_html(season, season_stats, month_stats, upto_week)
+
+        if weeks:
+            best = W.best_pickup_period(season, weeks)
+            worst = W.worst_faab_period(season, weeks)
+            faab_totals = W.faab_spent_by_team(season, weeks)
+            trades = W.trades_in(season, weeks)
+            if best or worst or faab_totals or trades or waiver_take:
+                bits = []
+                if best:
+                    spend = f"${best.faab}" if best.faab else "free"
+                    bits.append(f'<p><strong>Best pickup:</strong> {html.escape(season.team_name(best.roster_id))} '
+                               f'added {html.escape(best.player_name)} ({spend}) → {best.points_since:.1f} pts since</p>')
+                if worst:
+                    bits.append(f'<p><strong>Worst FAAB spend:</strong> {html.escape(season.team_name(worst.roster_id))} '
+                               f'paid ${worst.faab} for {html.escape(worst.player_name)} → {worst.points_since:.1f} pts since</p>')
+                if faab_totals:
+                    top = sorted(faab_totals.items(), key=lambda kv: kv[1], reverse=True)[:3]
+                    spend_str = ", ".join(f"{html.escape(season.team_name(rid))} (${amt})" for rid, amt in top)
+                    bits.append(f"<p><strong>Top FAAB spend:</strong> {spend_str}</p>")
+                if trades:
+                    trade_rows = "".join(f"<li>Week {t.week}: {html.escape(_format_trade(season, t))}</li>" for t in trades)
+                    bits.append(f"<p><strong>Trades ({len(trades)}):</strong></p><ul>{trade_rows}</ul>")
+                if waiver_take:
+                    bits.append(f'<p class="take">{html.escape(waiver_take)}</p>')
+                waiver_html = f"<h2>Waiver Wire &amp; Trades</h2>{''.join(bits)}"
+
+        if season_stats:
+            rows = ""
+            for s in sorted(season_stats.values(), key=lambda x: x.luck_index, reverse=True):
+                cls = "lucky" if s.luck_index > 0 else ("robbed" if s.luck_index < 0 else "")
+                rows += (f"<tr><td>{html.escape(season.team_name(s.roster_id))}</td>"
+                         f"<td class='num {cls}'>{s.luck_index:+.1f}</td>"
+                         f"<td class='num'>{s.all_play_w}-{s.all_play_l}</td>"
+                         f"<td class='num'>{s.avg_efficiency:.0f}%</td></tr>")
+            luck_html = f"""<h2>The (Un)Lucky Leaderboard</h2>
+              <table><tr><th>Team</th><th>Luck (W vs deserved)</th>
+              <th>All-Play</th><th>Efficiency</th></tr>{rows}</table>"""
+
+        if month_stats:
+            rows = ""
+            for m in sorted(month_stats.values(), key=lambda x: x.pts_above_avg, reverse=True):
+                rank = f"{m.rank_start} → {m.rank_end}" if m.rank_start else f"→ {m.rank_end}"
+                rank_cls = "lucky" if m.climb > 0 else ("robbed" if m.climb < 0 else "")
+                aa_cls = "lucky" if m.pts_above_avg > 0 else "robbed"
+                rows += (f"<tr><td>{html.escape(season.team_name(m.roster_id))}</td>"
+                         f"<td class='num'>{m.h2h_w}-{m.h2h_l}</td>"
+                         f"<td class='num {aa_cls}'>{m.pts_above_avg:+.1f}</td>"
+                         f"<td class='num {rank_cls}'>{rank}</td>"
+                         f"<td class='num'>{m.avg_efficiency:.0f}%</td></tr>")
+            month_html = f"""<h2>The Month in Review (this month's standing, not season-to-date)</h2>
+              <table><tr><th>Team</th><th>Record</th><th>+/- vs Avg</th>
+              <th>Rank (start → end)</th><th>Efficiency</th></tr>{rows}</table>"""
+
+    standings_section = (f"<h2>{standings_heading}</h2>"
+                        f"<table><tr><th>#</th><th>Team</th><th>W-L</th><th>PF</th><th>PA</th><th>Form</th></tr>{st_rows}</table>") \
+        if full_report else ""
 
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -534,10 +555,9 @@ def render_html(season, awards, roasts, period_label, season_stats=None,
 
   {closest_html}
 
-  <h2>{standings_heading}</h2>
-  <table><tr><th>#</th><th>Team</th><th>W-L</th><th>PF</th><th>PA</th><th>Form</th></tr>{st_rows}</table>
+  {standings_section}
 
-  {_charts_html(season, season_stats, month_stats, upto_week)}
+  {charts_html}
 
   {luck_html}
   {waiver_html}

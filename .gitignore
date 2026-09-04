@@ -5,3 +5,5 @@ leagues.csv
 assets/
 __pycache__/
 *.pyc
+.cache/
+reports/

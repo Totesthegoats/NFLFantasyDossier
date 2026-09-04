@@ -67,6 +67,33 @@ class Trade:
 
 
 @dataclass
+class DraftPick:
+    round: int
+    pick_no: int
+    roster_id: int
+    player_id: str | None
+    position: str
+    nfl_team: str
+    is_keeper: bool
+
+
+@dataclass
+class DraftData:
+    draft_id: str
+    league_id: str
+    season: str
+    league_name: str
+    rounds: int
+    teams: dict                # roster_id -> Team
+    players: dict               # player_id -> player dict
+    picks: list                 # DraftPick, sorted by pick_no
+
+    def team_name(self, roster_id):
+        t = self.teams.get(roster_id)
+        return t.team_name if t else f"Team {roster_id}"
+
+
+@dataclass
 class SeasonData:
     league_id: str
     name: str
@@ -224,4 +251,45 @@ def fetch_season(league_id: str, fetch_transactions: bool = True) -> SeasonData:
         players=players,
         transactions=transactions,
         trades=trades,
+    )
+
+
+def fetch_draft(league_id: str) -> DraftData:
+    """Fetches this league's current-season draft (league.draft_id)."""
+    league = _get(f"{API}/league/{league_id}")
+    draft_id = league.get("draft_id")
+    if not draft_id:
+        raise ValueError(f"League {league_id} has no recorded draft.")
+
+    rosters = _get(f"{API}/league/{league_id}/rosters") or []
+    users = _get(f"{API}/league/{league_id}/users") or []
+    teams = _build_teams(rosters, users)
+    players = _load_players()
+
+    draft_meta = _get(f"{API}/draft/{draft_id}") or {}
+    raw_picks = _get(f"{API}/draft/{draft_id}/picks") or []
+
+    picks = []
+    for p in raw_picks:
+        meta = p.get("metadata") or {}
+        picks.append(DraftPick(
+            round=p.get("round", 0),
+            pick_no=p.get("pick_no", 0),
+            roster_id=p.get("roster_id"),
+            player_id=p.get("player_id"),
+            position=meta.get("position") or "",
+            nfl_team=meta.get("team") or "",
+            is_keeper=bool(p.get("is_keeper")),
+        ))
+    picks.sort(key=lambda pk: pk.pick_no)
+
+    return DraftData(
+        draft_id=draft_id,
+        league_id=league_id,
+        season=str(league.get("season") or ""),
+        league_name=league.get("name") or "League",
+        rounds=(draft_meta.get("settings") or {}).get("rounds", 0),
+        teams=teams,
+        players=players,
+        picks=picks,
     )

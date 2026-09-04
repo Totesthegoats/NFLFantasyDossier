@@ -11,6 +11,9 @@ Examples:
     # A specific month
     python -m sleeper_dossier.cli --league 123456789 --month 2025-10 --html oct.html
 
+    # A single week's recap, as a PDF
+    python -m sleeper_dossier.cli --league 123456789 --week 5 --pdf week5.pdf
+
     # End-of-season review
     python -m sleeper_dossier.cli --league 123456789 --season --html review.html
 
@@ -33,6 +36,7 @@ from . import render as RND
 from . import calendar_map as CM
 from . import monthly as M
 from . import waivers as W
+from . import pdf as P
 
 
 def _parse_month(s):
@@ -75,9 +79,12 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Generate a Sleeper fantasy dossier (monthly/season).")
     ap.add_argument("--league", required=True, help="Sleeper league ID")
     ap.add_argument("--month", default=None, help="Month as YYYY-MM (default: latest completed)")
+    ap.add_argument("--week", type=int, default=None, help="A single NFL week's recap instead of monthly")
     ap.add_argument("--season", action="store_true", help="End-of-season review instead of monthly")
     ap.add_argument("--history", action="store_true", help="Print Manager-of-the-Month history and exit")
     ap.add_argument("--html", metavar="PATH", help="Write HTML to PATH")
+    ap.add_argument("--pdf", metavar="PATH",
+                    help="Write PDF to PATH (requires: pip install playwright && playwright install chromium)")
     ap.add_argument("--no-roast", action="store_true", help="Skip the Claude commentary layer")
     ap.add_argument("--no-transactions", action="store_true", help="Skip waiver/FAAB fetch (faster)")
     args = ap.parse_args(argv)
@@ -92,7 +99,32 @@ def main(argv=None):
         _print_history(season)
         return 0
 
-    if args.season:
+    if args.week:
+        week = args.week
+        if week not in season.weeks:
+            avail = ", ".join(str(w) for w in sorted(season.weeks))
+            raise SystemExit(f"No data for week {week}. Available: {avail}")
+        ctx, awards = A.compute_weekly(season, week)
+        ss = S.season_stats(season, upto_week=week)
+        period_label = f"Week {week}"
+        best = W.best_pickup_period(season, [week])
+        worst = W.worst_faab_period(season, [week])
+        faab_totals = W.faab_spent_by_team(season, [week])
+        trades = W.trades_in(season, [week])
+        roasts = {} if args.no_roast else R.write_roasts(season, awards, kind="week", period=period_label,
+                                                         season_stats=ss)
+        recap = "" if args.no_roast else R.write_league_recap(season, awards, kind="week", period=period_label,
+                                                              season_stats=ss)
+        waiver_take = "" if args.no_roast else R.write_waiver_take(
+            season, kind="week", period=period_label, best=best, worst=worst,
+            faab_totals=faab_totals, trades=trades)
+        text = RND.render_text(season, awards, roasts, period_label=period_label,
+                               season_stats=ss, kind="week", recap=recap, waiver_take=waiver_take,
+                               weeks=[week])
+        html_out = RND.render_html(season, awards, roasts, period_label=period_label,
+                                   season_stats=ss, kind="week", recap=recap, waiver_take=waiver_take,
+                                   weeks=[week])
+    elif args.season:
         ctx, awards = A.compute_season(season)
         ss = ctx["season_stats"]
         period_label = f"{season.season} Season Review"
@@ -144,6 +176,9 @@ def main(argv=None):
         with open(args.html, "w", encoding="utf-8") as f:
             f.write(html_out)
         print(f"\nHTML written to {args.html}", file=sys.stderr)
+    if args.pdf:
+        P.html_to_pdf(html_out, args.pdf)
+        print(f"PDF written to {args.pdf}", file=sys.stderr)
     return 0
 
 

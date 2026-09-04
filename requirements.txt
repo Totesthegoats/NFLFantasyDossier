@@ -1,0 +1,8 @@
+requests
+anthropic
+gspread
+google-auth
+
+# PDF export (sleeper_dossier.pdf / cli.py --pdf) also needs:
+#   playwright install chromium
+playwright
