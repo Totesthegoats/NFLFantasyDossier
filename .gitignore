@@ -3,6 +3,7 @@ NFLDossier/
 *.pdf
 leagues.csv
 assets/
+*_cards/
 __pycache__/
 *.pyc
 .cache/

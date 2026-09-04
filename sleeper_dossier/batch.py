@@ -203,10 +203,14 @@ def main(argv=None):
     os.makedirs(args.outdir, exist_ok=True)
     leagues = _load_leagues(args)
 
-    ok, failed = 0, 0
+    ok, failed, invalid = 0, 0, 0
     for row in leagues:
         lid = row["league_id"]
         label = row["label"] or lid
+        if not D.validate_league_id(lid):
+            print(f"  ! {label}: '{lid}' is not a valid Sleeper league ID — skipping", file=sys.stderr)
+            invalid += 1
+            continue
         tier = T.effective_tier(row["tier"], row["signup_date"])
         try:
             season, html_out, period = generate_one(
@@ -228,8 +232,8 @@ def main(argv=None):
             print(f"  x {label}: {e}", file=sys.stderr)
             failed += 1
 
-    print(f"\nDone: {ok} generated, {failed} failed.", file=sys.stderr)
-    return 0 if failed == 0 else 2
+    print(f"\nDone: {ok} generated, {failed} failed, {invalid} invalid league ID(s).", file=sys.stderr)
+    return 0 if failed == 0 and invalid == 0 else 2
 
 
 if __name__ == "__main__":

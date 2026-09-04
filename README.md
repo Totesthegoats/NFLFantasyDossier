@@ -100,6 +100,13 @@ Setup (one-time):
 `--week latest` resolves to each league's most recently completed week — this
 is what the scheduled automation uses (see below).
 
+Every row's `league_id` is checked against Sleeper (`data.validate_league_id`)
+before it's used — a typo'd, made-up, or no-longer-existing ID is skipped with
+a clear `not a valid Sleeper league ID` message instead of a raw HTTP error
+buried in a stack trace, and counted separately in the run summary. Bad
+`email` values aren't checked — a row with a working league_id and a broken
+email still generates its report, it just won't get sent.
+
 ### Free trial (`Teir` column)
 
 A row with `Teir` = `free` gets the **full-tier report** for its first 14
@@ -128,6 +135,23 @@ variables → Actions):
 Trigger a run manually from the Actions tab (`workflow_dispatch`) to test
 before waiting for the schedule.
 
+## Draft review (standalone)
+
+A separate one-off tool, unrelated to the weekly/monthly/season dossier:
+given a league ID, grades every team's most recent draft. Not batched, not
+scheduled — run it manually whenever a league's draft finishes.
+
+```bash
+python -m sleeper_dossier.draft_review --league YOUR_LEAGUE_ID --html draft.html
+```
+
+Requires `ANTHROPIC_API_KEY` — without it you still get the draft board, just
+no grades. Per team, it calls Claude (`claude-opus-5`) with the **web search**
+tool enabled so grades are grounded in real, current ADP and expert rankings
+rather than the model's training-data guesses, then parses a `Grade: B+`-style
+line plus a short roast-style paragraph out of the response (`draft_review.py`).
+One API call (with up to 5 searches) per team, so a 12-team league costs 12 calls.
+
 ## Architecture
 
 ```
@@ -147,6 +171,9 @@ sleeper_dossier/
   pdf.py          HTML -> PDF via headless Chromium (Playwright)
   cli.py          single-league entry point
   batch.py        many-league runner + email delivery
+  sheet.py        Google Sheet ingestion for batch mode (service account)
+  trial.py        free-trial tier resolution (Date + Teir columns -> effective tier)
+  draft_review.py standalone: web-search-grounded draft grades (not part of the dossier)
 ```
 
 Data flows one way: `data → stats/waivers/history → awards → roast → render (→ pdf)`.

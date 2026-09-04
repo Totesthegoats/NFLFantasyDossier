@@ -128,6 +128,23 @@ def _get(url: str):
     return resp.json()
 
 
+def validate_league_id(league_id: str) -> bool:
+    """Cheap existence check (just /league/{id} — no rosters/weeks/transactions).
+    False for a made-up, malformed, or no-longer-existing league ID; re-raises
+    on anything that isn't a definitive 404 (network errors, etc.) since those
+    aren't evidence the ID is bad."""
+    league_id = (league_id or "").strip()
+    if not league_id.isdigit():
+        return False
+    try:
+        league = _get(f"{API}/league/{league_id}")
+    except requests.exceptions.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            return False
+        raise
+    return bool(league) and str(league.get("league_id")) == league_id
+
+
 def _load_players() -> dict:
     os.makedirs(_CACHE_DIR, exist_ok=True)
     if os.path.exists(_PLAYERS_CACHE) and time.time() - os.path.getmtime(_PLAYERS_CACHE) < _PLAYERS_TTL:
