@@ -1,2 +1,7 @@
 *.html
 NFLDossier/
+*.pdf
+leagues.csv
+assets/
+__pycache__/
+*.pyc
