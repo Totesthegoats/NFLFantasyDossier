@@ -3,6 +3,12 @@ anthropic
 gspread
 google-auth
 
-# PDF export (sleeper_dossier.pdf / cli.py --pdf) also needs:
+# Decision Lab (sleeper_dossier.decision) — nflverse projection/opportunity data.
+# Optional: without it, decision.py falls back to Sleeper's own pre-game
+# projections and still works, just with a less precise "expected points" model.
+nfl_data_py
+pandas
+
+# PDF export (sleeper_dossier.pdf / cli.py --pdf, --assets) also needs:
 #   playwright install chromium
 playwright

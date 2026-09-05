@@ -76,6 +76,9 @@ python -m sleeper_dossier.batch --csv leagues.csv --week 5
 
 # End-of-season reviews for everyone
 python -m sleeper_dossier.batch --csv leagues.csv --season
+
+# Also write a paginated PDF (Decision Lab charts included) alongside each HTML
+python -m sleeper_dossier.batch --csv leagues.csv --week 5 --pdf
 ```
 
 Email requires: `SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM`.
@@ -165,10 +168,16 @@ sleeper_dossier/
   history.py      cross-season rivalry data (previous_league_id chain, cached to disk —
                   past seasons never change, so the chain is only ever walked once)
   awards.py       Hall of Fame/Shame engine (MONTHLY_AWARDS, SEASON_AWARDS, WEEKLY_AWARDS)
-  roast.py        Claude API commentary layer (degrades gracefully without a key)
+  decision.py     Decision Lab: projection-vs-actual player awards (nflverse, falls back
+                  to Sleeper's own pre-game projections if nfl_data_py/nflverse is unavailable)
+  roast.py        Claude API commentary layer (generate_commentary — degrades gracefully
+                  without a key)
   images.py       avatar/headshot URL construction + local disk cache -> base64 data URIs
-  render.py       text + HTML renderers (HTML is the screenshot-friendly asset)
+  render.py       text + HTML renderers (render_html/render_text for monthly/season,
+                  render_weekly_html/render_weekly_text for a single week)
+  pdf_render.py   paginated, print-ready HTML for pdf.py (landscape A4, one page per section)
   pdf.py          HTML -> PDF via headless Chromium (Playwright)
+  assets.py       screenshot every award card/chart/table in a report to individual PNGs
   cli.py          single-league entry point
   batch.py        many-league runner + email delivery
   sheet.py        Google Sheet ingestion for batch mode (service account)
@@ -176,7 +185,7 @@ sleeper_dossier/
   draft_review.py standalone: web-search-grounded draft grades (not part of the dossier)
 ```
 
-Data flows one way: `data → stats/waivers/history → awards → roast → render (→ pdf)`.
+Data flows one way: `data → stats/waivers/history/decision → awards → roast → render (→ pdf_render → pdf)`.
 
 ### Award card images
 

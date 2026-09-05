@@ -305,7 +305,7 @@ def main():
 
     print()
     print("#" * 70)
-    print(f"  SLEEPER LEAGUE DIAGNOSTIC")
+    print("  SLEEPER LEAGUE DIAGNOSTIC")
     print(f"  League ID : {league_id}")
     if probe_week:
         print(f"  Probing   : week {probe_week}")

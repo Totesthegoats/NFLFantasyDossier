@@ -36,6 +36,7 @@ class Efficiency:
     bench_points: float
     best_benched_player: str
     best_benched_points: float
+    best_benched_player_id: str | None = None
 
 
 @dataclass
@@ -58,6 +59,29 @@ def weekly_scores(week_data: dict) -> dict:
 def weekly_median(week_data: dict) -> float:
     scores = list(weekly_scores(week_data).values())
     return statistics.median(scores) if scores else 0.0
+
+
+def median_record(season, upto_week: int | None = None) -> dict:
+    """roster_id -> {above, below, tied}: weeks beating/missing/tying that
+    week's league median through upto_week. The season-long generalization
+    of the weekly median what-if — schedule-blind like all-play, but
+    benchmarked against the middle of the pack each week rather than every
+    opponent, so it can disagree with both the standings and all-play."""
+    counts = {rid: {"above": 0, "below": 0, "tied": 0} for rid in season.teams}
+    for wk in sorted(season.weeks.keys()):
+        if upto_week is not None and wk > upto_week:
+            break
+        wd = season.weeks[wk]
+        med = weekly_median(wd)
+        for rid, wt in wd.items():
+            counts.setdefault(rid, {"above": 0, "below": 0, "tied": 0})
+            if wt.points > med:
+                counts[rid]["above"] += 1
+            elif wt.points < med:
+                counts[rid]["below"] += 1
+            else:
+                counts[rid]["tied"] += 1
+    return counts
 
 
 def matchup_pairs(week_data: dict) -> list:
@@ -129,9 +153,11 @@ def lineup_efficiency(season, week_data: dict) -> dict:
         if bench_ids:
             bi = max(range(len(bench_ids)), key=lambda i: bench_pts[i])
             best_benched_player = D.player_name(season.players, bench_ids[bi])
+            best_benched_player_id = bench_ids[bi]
             best_benched_points = bench_pts[bi]
         else:
             best_benched_player = "—"
+            best_benched_player_id = None
             best_benched_points = 0.0
 
         efficiency = round(actual / optimal * 100, 1) if optimal else 100.0
@@ -143,6 +169,7 @@ def lineup_efficiency(season, week_data: dict) -> dict:
             bench_points=bench_points,
             best_benched_player=best_benched_player,
             best_benched_points=round(best_benched_points, 2),
+            best_benched_player_id=best_benched_player_id,
         )
     return out
 
@@ -308,5 +335,124 @@ def power_rank(season, upto_week: int, form_window: int = 3) -> dict:
             "all_play_pct": round(all_play_pct.get(rid, 50.0), 1),
             "form_pct": round(form_pct.get(rid, 50.0), 1),
             "efficiency_pct": round(avg_eff.get(rid, 100.0), 1),
+        }
+    return out
+
+
+def season_metric_distribution(season, metric_fn, upto_week: int | None = None) -> list:
+    """One value per team per played week (up to upto_week), via
+    metric_fn(season, week, week_data) -> {roster_id: float}. The
+    historical comparison pool roast severity scoring normalizes against —
+    e.g. every team's bench-points total in every week played this season,
+    so a single week's bench-points figure can be judged against "how bad
+    does this get, historically" rather than just that week's other 9 teams."""
+    values = []
+    for wk in sorted(season.weeks.keys()):
+        if upto_week is not None and wk > upto_week:
+            break
+        wd = season.weeks[wk]
+        try:
+            per_team = metric_fn(season, wk, wd)
+        except Exception:
+            continue
+        values.extend(v for v in per_team.values() if v is not None)
+    return values
+
+
+def severity_from_pool(value: float, pool: list, cap_percentile: int = 95) -> float:
+    """0-100: |value|'s magnitude relative to the pool's cap_percentile-th
+    percentile (a "how bad does this get, historically" benchmark), capped
+    at 100. Using a high percentile rather than the literal max avoids one
+    freak outlier permanently flattening every future comparison near zero."""
+    if not pool:
+        return 50.0
+    mags = sorted(abs(v) for v in pool)
+    idx = max(0, min(len(mags) - 1, int(len(mags) * cap_percentile / 100) - 1))
+    benchmark = mags[idx] or 1.0
+    return round(min(100.0, abs(value) / benchmark * 100), 1)
+
+
+def season_points_by_player(season, upto_week: int | None = None) -> dict:
+    """player_id -> total fantasy points scored this season (or through
+    upto_week), merged across whichever roster held them each week. A
+    player's score is intrinsic to them, not their fantasy team, so this
+    sums correctly across trades/drops without needing to track who held
+    them when — feeds the draft-value board's "production" side."""
+    totals = {}
+    for wk, wd in season.weeks.items():
+        if upto_week is not None and wk > upto_week:
+            continue
+        for wt in wd.values():
+            for pid, pts in zip(wt.starters, wt.starter_points):
+                if pid:
+                    totals[pid] = totals.get(pid, 0.0) + (pts or 0.0)
+            for pid, pts in zip(wt.bench, wt.bench_points):
+                if pid:
+                    totals[pid] = totals.get(pid, 0.0) + (pts or 0.0)
+    return {pid: round(v, 2) for pid, v in totals.items()}
+
+
+def draft_value_board(season, top_n: int = 5) -> dict:
+    """Biggest draft-value steals and busts this season: production rank
+    vs. draft-slot rank. value_delta = draft_rank - points_rank — positive
+    means the player outscored their draft slot (a 120th pick finishing
+    15th in points), negative means they underperformed it (a 5th pick
+    finishing 90th). Limited to players this league actually drafted
+    (season.draft_picks) who scored at least one point this season; returns
+    {"values": [], "busts": []} if there's no recorded draft for this
+    league. Keeper leagues will skew this — a kept player's "round" reflects
+    keeper cost, not a real ADP signal, which callers should caveat."""
+    if not season.draft_picks:
+        return {"values": [], "busts": []}
+    points = season_points_by_player(season)
+    rows = []
+    for pid, info in season.draft_picks.items():
+        pts = points.get(pid)
+        if pts is None or pts <= 0 or info.get("pick_no") is None:
+            continue
+        rows.append({
+            "player_id": pid, "player_name": D.player_name(season.players, pid),
+            "pick_no": info["pick_no"], "round": info.get("round"),
+            "roster_id": info.get("roster_id"), "is_keeper": info.get("is_keeper"),
+            "points": pts,
+        })
+    if not rows:
+        return {"values": [], "busts": []}
+
+    by_pick = sorted(rows, key=lambda r: r["pick_no"])
+    for i, r in enumerate(by_pick, 1):
+        r["draft_rank"] = i
+    by_points = sorted(rows, key=lambda r: r["points"], reverse=True)
+    for i, r in enumerate(by_points, 1):
+        r["points_rank"] = i
+    for r in rows:
+        r["value_delta"] = r["draft_rank"] - r["points_rank"]
+
+    ranked = sorted(rows, key=lambda r: r["value_delta"], reverse=True)
+    n = min(top_n, len(ranked) // 2) if len(ranked) < 2 * top_n else top_n
+    if n == 0:
+        return {"values": [], "busts": []}
+    return {"values": ranked[:n], "busts": list(reversed(ranked[-n:]))}
+
+
+def week_report_stats(season, week: int) -> dict:
+    """roster_id -> {score, all_play_w, all_play_l, efficiency, power_rank} —
+    one bundle a weekly report's roast layer needs per team. Shared by
+    cli.py and batch.py so the shape only lives in one place."""
+    wd = season.weeks.get(week, {})
+    scores = weekly_scores(wd)
+    ap = all_play(wd)
+    eff = lineup_efficiency(season, wd)
+    pr = power_rank(season, week)
+    ranked_pr = sorted(pr.items(), key=lambda kv: kv[1]["score"], reverse=True)
+    power_rank_of = {rid: i + 1 for i, (rid, _p) in enumerate(ranked_pr)}
+    out = {}
+    for rid in scores:
+        w, l, _t = ap.get(rid, (0, 0, 0))
+        out[rid] = {
+            "score": scores[rid],
+            "all_play_w": w, "all_play_l": l,
+            "efficiency": eff[rid].efficiency if rid in eff else None,
+            "power_rank": power_rank_of.get(rid),
         }
     return out

@@ -46,15 +46,19 @@ class Team:
     ties: int
     points_for: float
     points_against: float
+    avatar: str | None = None            # Sleeper avatar ID (hash), or a full URL in rare cases
+    avatar_full_url: str | None = None   # set when the user uploaded a custom avatar
+    waiver_budget_used: int = 0          # cumulative FAAB spent this season (from roster settings)
 
 
 @dataclass
 class Transaction:
     week: int
     roster_id: int
-    type: str          # "waiver" | "free_agent"
+    type: str                          # "waiver" | "free_agent"
     faab: int
     player_id: str
+    drops: list = field(default_factory=list)   # player_ids dropped in the same claim
 
 
 @dataclass
@@ -64,33 +68,7 @@ class Trade:
     adds: dict          # player_id -> roster_id that received the player
     drops: dict         # player_id -> roster_id that gave up the player
     draft_picks: int = 0
-
-
-@dataclass
-class DraftPick:
-    round: int
-    pick_no: int
-    roster_id: int
-    player_id: str | None
-    position: str
-    nfl_team: str
-    is_keeper: bool
-
-
-@dataclass
-class DraftData:
-    draft_id: str
-    league_id: str
-    season: str
-    league_name: str
-    rounds: int
-    teams: dict                # roster_id -> Team
-    players: dict               # player_id -> player dict
-    picks: list                 # DraftPick, sorted by pick_no
-
-    def team_name(self, roster_id):
-        t = self.teams.get(roster_id)
-        return t.team_name if t else f"Team {roster_id}"
+    draft_picks_raw: list = field(default_factory=list)   # full pick dicts from Sleeper
 
 
 @dataclass
@@ -104,6 +82,8 @@ class SeasonData:
     players: dict               # player_id -> player dict
     transactions: list = field(default_factory=list)
     trades: list = field(default_factory=list)
+    draft_picks: dict = field(default_factory=dict)   # player_id -> {"pick_no", "round", "roster_id", "is_keeper"}
+    faab_budget: int = 100                            # league-wide starting FAAB cap
 
     def team_name(self, roster_id):
         t = self.teams.get(roster_id)
@@ -182,6 +162,9 @@ def _build_teams(rosters: list, users: list) -> dict:
             ties=settings.get("ties", 0),
             points_for=_money(settings.get("fpts"), settings.get("fpts_decimal")),
             points_against=_money(settings.get("fpts_against"), settings.get("fpts_against_decimal")),
+            avatar=user.get("avatar"),
+            avatar_full_url=(user.get("metadata") or {}).get("avatar"),
+            waiver_budget_used=settings.get("waiver_budget_used", 0),
         )
     return teams
 
@@ -224,18 +207,45 @@ def _fetch_week_transactions(league_id: str, week: int):
         ttype = t.get("type")
         if ttype in ("waiver", "free_agent"):
             adds = t.get("adds") or {}
+            drops_map = t.get("drops") or {}
             faab = (t.get("settings") or {}).get("waiver_bid", 0) or 0
             for pid, rid in adds.items():
-                waivers.append(Transaction(week=week, roster_id=rid, type=ttype, faab=faab, player_id=pid))
+                # drops_for_this: players this roster dropped in the same claim
+                drops_for_this = [dpid for dpid, drid in drops_map.items() if drid == rid]
+                waivers.append(Transaction(
+                    week=week, roster_id=rid, type=ttype, faab=faab,
+                    player_id=pid, drops=drops_for_this,
+                ))
         elif ttype == "trade":
+            raw_picks = t.get("draft_picks") or []
             trades.append(Trade(
                 week=week,
                 roster_ids=t.get("roster_ids") or [],
                 adds=t.get("adds") or {},
                 drops=t.get("drops") or {},
-                draft_picks=len(t.get("draft_picks") or []),
+                draft_picks=len(raw_picks),
+                draft_picks_raw=raw_picks,
             ))
     return waivers, trades
+
+
+def _fetch_draft_picks(draft_id: str) -> dict:
+    """player_id -> draft slot info for this league's draft. Best-effort:
+    leagues with no recorded draft (or a draft_id Sleeper hasn't populated
+    picks for yet) just get an empty dict, not an error."""
+    picks = _get(f"{API}/draft/{draft_id}/picks") or []
+    out = {}
+    for p in picks:
+        pid = p.get("player_id")
+        if not pid:
+            continue
+        out[pid] = {
+            "pick_no": p.get("pick_no"),
+            "round": p.get("round"),
+            "roster_id": p.get("roster_id"),
+            "is_keeper": p.get("is_keeper"),
+        }
+    return out
 
 
 def fetch_season(league_id: str, fetch_transactions: bool = True) -> SeasonData:
@@ -258,6 +268,14 @@ def fetch_season(league_id: str, fetch_transactions: bool = True) -> SeasonData:
             transactions.extend(w)
             trades.extend(t)
 
+    draft_id = league.get("draft_id")
+    try:
+        draft_picks = _fetch_draft_picks(draft_id) if draft_id else {}
+    except requests.RequestException:
+        draft_picks = {}
+
+    faab_budget = int((league.get("settings") or {}).get("waiver_budget", 100) or 100)
+
     return SeasonData(
         league_id=league_id,
         name=league.get("name") or "League",
@@ -268,45 +286,6 @@ def fetch_season(league_id: str, fetch_transactions: bool = True) -> SeasonData:
         players=players,
         transactions=transactions,
         trades=trades,
-    )
-
-
-def fetch_draft(league_id: str) -> DraftData:
-    """Fetches this league's current-season draft (league.draft_id)."""
-    league = _get(f"{API}/league/{league_id}")
-    draft_id = league.get("draft_id")
-    if not draft_id:
-        raise ValueError(f"League {league_id} has no recorded draft.")
-
-    rosters = _get(f"{API}/league/{league_id}/rosters") or []
-    users = _get(f"{API}/league/{league_id}/users") or []
-    teams = _build_teams(rosters, users)
-    players = _load_players()
-
-    draft_meta = _get(f"{API}/draft/{draft_id}") or {}
-    raw_picks = _get(f"{API}/draft/{draft_id}/picks") or []
-
-    picks = []
-    for p in raw_picks:
-        meta = p.get("metadata") or {}
-        picks.append(DraftPick(
-            round=p.get("round", 0),
-            pick_no=p.get("pick_no", 0),
-            roster_id=p.get("roster_id"),
-            player_id=p.get("player_id"),
-            position=meta.get("position") or "",
-            nfl_team=meta.get("team") or "",
-            is_keeper=bool(p.get("is_keeper")),
-        ))
-    picks.sort(key=lambda pk: pk.pick_no)
-
-    return DraftData(
-        draft_id=draft_id,
-        league_id=league_id,
-        season=str(league.get("season") or ""),
-        league_name=league.get("name") or "League",
-        rounds=(draft_meta.get("settings") or {}).get("rounds", 0),
-        teams=teams,
-        players=players,
-        picks=picks,
+        draft_picks=draft_picks,
+        faab_budget=faab_budget,
     )

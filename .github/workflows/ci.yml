@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request: {}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Byte-compile (syntax check)
+        run: python -m compileall -q sleeper_dossier
+
+      - name: Import smoke test
+        run: |
+          python -c "
+          import sleeper_dossier.cli
+          import sleeper_dossier.batch
+          import sleeper_dossier.draft_review
+          import sleeper_dossier.sheet
+          import sleeper_dossier.trial
+          print('all modules import cleanly')
+          "

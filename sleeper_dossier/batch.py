@@ -24,7 +24,7 @@ Usage:
     python -m sleeper_dossier.batch --csv leagues.csv --month 2025-10 --email
 
     # A single week's recap for every league, sourced from a Google Sheet
-    python -m sleeper_dossier.batch --sheet SHEET_ID --week 5 --email
+    python -m sleeper_dossier.batch --sheet SHEET_ID --week latest --email
 
     # End-of-season reviews for everyone
     python -m sleeper_dossier.batch --csv leagues.csv --season
@@ -44,37 +44,58 @@ from . import awards as A
 from . import stats as S
 from . import roast as R
 from . import render as RND
+from . import pdf_render as PRND
 from . import calendar_map as CM
 from . import monthly as M
 from . import waivers as W
+from . import history as H
+from . import decision as DEC
 from . import trial as T
 
 
-def generate_one(league_id, month_arg=None, week_arg=None, do_season=False, do_roast=True, tier="normal"):
-    """Returns (season, html, period_label) or (season, None, None)."""
+def generate_one(league_id, month_arg=None, week_arg=None, do_season=False,
+                 do_roast=True, do_pdf=False, tier="normal"):
+    """Returns (season, html, pdf_html, period_label) or (season, None, None, None).
+    pdf_html is None when do_pdf=False."""
     season = D.fetch_season(league_id)
     if not season.weeks:
-        return None, None, None
+        return None, None, None, None
 
     if week_arg:
         week = max(season.weeks.keys()) if week_arg == "latest" else int(week_arg)
         if week not in season.weeks:
-            return season, None, None
-        ctx, awards = A.compute_weekly(season, week)
-        ss = S.season_stats(season, upto_week=week)
-        label = f"Week {week}"
-        best = W.best_pickup_period(season, [week])
-        worst = W.worst_faab_period(season, [week])
-        faab_totals = W.faab_spent_by_team(season, [week])
-        trades = W.trades_in(season, [week])
-        roasts = R.write_roasts(season, awards, kind="week", period=label, season_stats=ss) if do_roast else {}
-        recap = R.write_league_recap(season, awards, kind="week", period=label, season_stats=ss) if do_roast else ""
-        waiver_take = R.write_waiver_take(season, kind="week", period=label, best=best, worst=worst,
-                                          faab_totals=faab_totals, trades=trades) if do_roast else ""
-        html_out = RND.render_html(season, awards, roasts, period_label=label,
-                                   season_stats=ss, kind="week", recap=recap, waiver_take=waiver_take,
-                                   weeks=[week], tier=tier)
-        return season, html_out, label
+            return season, None, None, None
+        _ctx, awards = A.compute_weekly(season, week)
+        week_stats = S.week_report_stats(season, week)
+        rivalry_matchups = H.rivalry_matchups_for_week(season, league_id, week)
+        period = f"Week {week}"
+        label = f"{period} Recap"
+
+        # Decision Lab: computed even when do_pdf=False so its highest-severity
+        # awards can still inform the roast commentary (matches cli.py).
+        dec_lines, dec_awards = [], []
+        try:
+            dec_lines, *_ = DEC.enrich_lineups(season, week)
+            dec_awards = DEC.compute_decision_awards(dec_lines, season, week)
+        except Exception as e:
+            print(f"  [batch] Decision Lab skipped for {season.name} week {week}: {e}", file=sys.stderr)
+
+        roastable_dec = [a for a in dec_awards if a.winner_rid is not None
+                         and not a.extra.get("unavailable")]
+        awards_for_roast = list(awards) + roastable_dec
+
+        commentary = R.generate_commentary(
+            season, awards_for_roast, kind="weekly", period=period, week_stats=week_stats,
+            week=week, rivalry_matchups=rivalry_matchups) if do_roast else {}
+        roasts = commentary.get("roasts", {})
+        recap = commentary.get("recap", "")
+        html_out = RND.render_weekly_html(season, awards, roasts, period_label=label, week=week,
+                                          rivalry_matchups=rivalry_matchups, recap=recap, tier=tier)
+        pdf_out = PRND.render_pdf_weekly_html(
+            season, awards, roasts, period_label=label, week=week,
+            rivalry_matchups=rivalry_matchups, recap=recap,
+            decision_lines=dec_lines, decision_awards=dec_awards) if do_pdf else None
+        return season, html_out, pdf_out, label
 
     if do_season:
         ctx, awards = A.compute_season(season)
@@ -85,18 +106,23 @@ def generate_one(league_id, month_arg=None, week_arg=None, do_season=False, do_r
         worst = W.worst_faab_period(season, weeks)
         faab_totals = W.faab_spent_by_team(season, weeks)
         trades = W.trades_in(season, weeks)
-        roasts = R.write_roasts(season, awards, kind="season", season_stats=ss) if do_roast else {}
-        recap = R.write_league_recap(season, awards, kind="season", season_stats=ss) if do_roast else ""
+        commentary = R.generate_commentary(
+            season, awards, kind="season", season_stats=ss) if do_roast else {}
+        roasts = commentary.get("roasts", {})
+        recap = commentary.get("recap", "")
         waiver_take = R.write_waiver_take(season, kind="season", best=best, worst=worst,
                                           faab_totals=faab_totals, trades=trades) if do_roast else ""
         html_out = RND.render_html(season, awards, roasts, period_label=label,
                                    season_stats=ss, kind="season", recap=recap, waiver_take=waiver_take,
                                    tier=tier)
-        return season, html_out, label
+        pdf_out = PRND.render_pdf_html(
+            season, awards, roasts, period_label=label,
+            season_stats=ss, kind="season", recap=recap, waiver_take=waiver_take) if do_pdf else None
+        return season, html_out, pdf_out, label
 
     season_year = int(season.season) if season.season.isdigit() else None
     if season_year is None:
-        return season, None, None
+        return season, None, None, None
     buckets = CM.group_weeks_by_month(season_year, sorted(season.weeks.keys()))
     if month_arg:
         y, m = month_arg.split("-")
@@ -105,7 +131,7 @@ def generate_one(league_id, month_arg=None, week_arg=None, do_season=False, do_r
     else:
         key, weeks = CM.current_month_weeks(season_year, sorted(season.weeks.keys()))
     if not weeks:
-        return season, None, None
+        return season, None, None, None
 
     ms = M.month_stats(season, weeks)
     prev_weeks = CM.previous_month_weeks(buckets, key)
@@ -118,16 +144,21 @@ def generate_one(league_id, month_arg=None, week_arg=None, do_season=False, do_r
     worst = W.worst_faab_period(season, weeks)
     faab_totals = W.faab_spent_by_team(season, weeks)
     trades = W.trades_in(season, weeks)
-    roasts = R.write_roasts(season, awards, kind="monthly", period=period,
-                            season_stats=ss, month_stats=ms) if do_roast else {}
-    recap = R.write_league_recap(season, awards, kind="monthly", period=period,
-                                 season_stats=ss, month_stats=ms) if do_roast else ""
+    commentary = R.generate_commentary(
+        season, awards, kind="monthly", period=period,
+        season_stats=ss, month_stats=ms) if do_roast else {}
+    roasts = commentary.get("roasts", {})
+    recap = commentary.get("recap", "")
     waiver_take = R.write_waiver_take(season, kind="monthly", period=period, best=best, worst=worst,
                                       faab_totals=faab_totals, trades=trades) if do_roast else ""
     html_out = RND.render_html(season, awards, roasts, period_label=label,
                                season_stats=ss, kind="monthly", month_stats=ms, recap=recap,
                                waiver_take=waiver_take, tier=tier)
-    return season, html_out, label
+    pdf_out = PRND.render_pdf_html(
+        season, awards, roasts, period_label=label,
+        season_stats=ss, kind="monthly", month_stats=ms,
+        recap=recap, waiver_take=waiver_take) if do_pdf else None
+    return season, html_out, pdf_out, label
 
 
 def send_email(to_addr, subject, html_body):
@@ -190,15 +221,20 @@ def main(argv=None):
     src.add_argument("--csv", help="leagues.csv (league_id,label,email)")
     src.add_argument("--sheet", help="Google Sheet ID (columns: Date, email, league_id, Teir)")
     ap.add_argument("--month", default=None, help="Month YYYY-MM (default: latest completed)")
+    ap.add_argument("--season", action="store_true", help="End-of-season reviews")
     ap.add_argument("--week", default=None,
                     help="A single NFL week's recap instead of monthly. An integer, or 'latest' "
                          "for each league's most recently completed week")
-    ap.add_argument("--season", action="store_true", help="End-of-season reviews")
     ap.add_argument("--outdir", default="reports")
+    ap.add_argument("--pdf", action="store_true",
+                    help="Also write a PDF alongside each HTML (requires playwright + chromium).")
     ap.add_argument("--email", action="store_true",
                     help="Email each report (requires SMTP_* env vars). Sends real mail.")
     ap.add_argument("--no-roast", action="store_true")
     args = ap.parse_args(argv)
+
+    if args.pdf:
+        from . import pdf as PDF
 
     os.makedirs(args.outdir, exist_ok=True)
     leagues = _load_leagues(args)
@@ -213,9 +249,9 @@ def main(argv=None):
             continue
         tier = T.effective_tier(row["tier"], row["signup_date"])
         try:
-            season, html_out, period = generate_one(
+            season, html_out, pdf_out, period = generate_one(
                 lid, month_arg=args.month, week_arg=args.week, do_season=args.season,
-                do_roast=not args.no_roast, tier=tier)
+                do_roast=not args.no_roast, do_pdf=args.pdf, tier=tier)
             if not html_out:
                 print(f"  ! {label}: no data for period", file=sys.stderr)
                 failed += 1
@@ -225,6 +261,13 @@ def main(argv=None):
                 fh.write(html_out)
             print(f"  ok {label} ({tier}): {path}")
             ok += 1
+            if args.pdf and pdf_out:
+                pdf_path = path.replace(".html", ".pdf")
+                try:
+                    PDF.html_to_pdf(pdf_out, pdf_path)
+                    print(f"     pdf: {pdf_path}")
+                except Exception as pe:
+                    print(f"     pdf failed: {pe}", file=sys.stderr)
             if args.email and row["email"]:
                 send_email(row["email"], f"{season.name} - {period}", html_out)
                 print(f"     emailed {row['email']}")

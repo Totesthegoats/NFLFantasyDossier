@@ -26,6 +26,10 @@ class Award:
     winner_rid: int | None
     headline: str                   # formatted value for the winner
     podium: list = field(default_factory=list)   # [(rid, value_str), ...]
+    severity: float = 0.0           # 0-100, how extreme — set by _attach_severity
+    image_kind: str = "manager"     # "manager" | "player" | "trade" | "none" — what render.py embeds
+    player_id: str | None = None    # set when image_kind == "player"
+    loser_rid: int | None = None    # set when image_kind == "trade" (the other manager)
 
 
 # ----------------------------------------------------------------------
@@ -58,7 +62,7 @@ def a_sharpshooter(ctx):
     rid, pid, pts = best
     name = S.D.player_name(ctx["season"].players, pid)
     return Award("The Sharpshooter", "Highest-scoring starter", "fame",
-                 rid, f"{name} — {pts:.1f} pts", [])
+                 rid, f"{name} — {pts:.1f} pts", [], image_kind="player", player_id=pid)
 
 
 def a_highway_robbery(ctx):
@@ -144,16 +148,6 @@ def a_sleepwalker(ctx):
                  rid, f"unchanged lineup{extra}", [])
 
 
-def a_bench_warmer(ctx):
-    eff = ctx["efficiency"]
-    r = sorted(eff.values(), key=lambda e: e.bench_points, reverse=True)
-    top = r[0]
-    return Award("Bench Warmer of the Week", "Most points left on the bench", "shame",
-                 top.roster_id,
-                 f"{top.bench_points:.1f} benched (worst: {top.best_benched_player} {top.best_benched_points:.1f})",
-                 [(e.roster_id, f"{e.bench_points:.1f} benched") for e in r[1:3]])
-
-
 def a_bumbling_boss(ctx):
     """Lowest lineup efficiency — the weekly villain."""
     eff = ctx["efficiency"]
@@ -167,15 +161,6 @@ def a_bumbling_boss(ctx):
                  [(e.roster_id, f"{e.efficiency:.0f}%") for e in r[1:3]])
 
 
-def a_perfect_manager(ctx):
-    """Highest efficiency — set (near) their best possible lineup."""
-    eff = ctx["efficiency"]
-    r = sorted(eff.values(), key=lambda e: e.efficiency, reverse=True)
-    top = r[0]
-    return Award("The Perfect Manager", "Best lineup management this week", "fame",
-                 top.roster_id, f"{top.efficiency:.0f}% efficient", [])
-
-
 def a_faab_fumbler(ctx):
     fm = ctx.get("faab_fumbler")
     if not fm:
@@ -185,7 +170,7 @@ def a_faab_fumbler(ctx):
     else:
         val = f"${fm.faab} on {fm.player_name} = ${fm.cost_per_point}/pt"
     return Award("Waiver Disaster", "Worst waiver-wire spend", "shame",
-                 fm.roster_id, val, [])
+                 fm.roster_id, val, [], image_kind="player", player_id=fm.player_id)
 
 
 def a_wheeler_dealer(ctx):
@@ -195,13 +180,14 @@ def a_wheeler_dealer(ctx):
     spend = f"${bp.faab}" if bp.faab else "free"
     return Award("Wheeler Dealer", "Shrewdest waiver pickup", "fame",
                  bp.roster_id,
-                 f"{bp.player_name} ({spend}) → {bp.points_since:.1f} pts since", [])
+                 f"{bp.player_name} ({spend}) → {bp.points_since:.1f} pts since", [],
+                 image_kind="player", player_id=bp.player_id)
 
 
 WEEKLY_AWARDS = [
-    a_top_of_pile, a_sharpshooter, a_highway_robbery, a_perfect_manager,
+    a_top_of_pile, a_sharpshooter, a_highway_robbery,
     a_wheeler_dealer, a_coin_flip_king, a_nail_biter,
-    a_bottom_feeder, a_bench_warmer, a_bumbling_boss, a_robbed,
+    a_bottom_feeder, a_bumbling_boss, a_robbed,
     a_faab_fumbler, a_sleepwalker,
 ]
 
@@ -352,12 +338,138 @@ def s_faabulous(ctx):
                  [(rid2, f"${a2}") for rid2, a2 in r[1:3]])
 
 
+def s_pickup_of_season(ctx):
+    """Best single waiver/FA add of the season — distinct from Waiver
+    Warrior's volume-across-all-pickups framing; this names one move."""
+    bp = ctx.get("best_pickup")
+    if not bp or bp.points_since <= 0:
+        return None
+    spend = f"${bp.faab}" if bp.faab else "free"
+    return Award("Pickup of the Season", "Best single waiver/FA add this season", "fame",
+                 bp.roster_id, f"{bp.player_name} ({spend}) → {bp.points_since:.1f} pts since", [],
+                 image_kind="player", player_id=bp.player_id)
+
+
+def s_best_trade(ctx):
+    """The season's most lopsided single trade, by points swing between the
+    two sides — distinct from The Mark's team-level net-across-all-trades
+    framing; this names one specific deal."""
+    to = ctx.get("best_trade")
+    if not to:
+        return None
+    season = ctx["season"]
+    note = " (plus draft pick(s), not valued here)" if to.trade.draft_picks else ""
+    val = (f"beat {season.team_name(to.loser_rid)} by {to.margin:+.1f} pts since "
+          f"({to.winner_value:+.1f} to {to.loser_value:+.1f}){note}")
+    return Award("Best Trade of the Season", "Most lopsided trade this season", "fame",
+                 to.winner_rid, val, [], image_kind="trade", loser_rid=to.loser_rid)
+
+
 SEASON_AWARDS = [
     s_coach_of_year, s_iron_manager, s_luckiest, s_highest_high,
-    s_wheeler_dealer, s_waiver_warrior, s_faabulous,
+    s_wheeler_dealer, s_waiver_warrior, s_faabulous, s_pickup_of_season, s_best_trade,
     s_bumbler_of_year, s_boom_bust, s_unluckiest, s_bench_hoarder, s_lowest_low,
     s_the_mark, s_waiver_washout,
 ]
+
+
+# ----------------------------------------------------------------------
+# SEVERITY SCORING
+#
+# Roast severity (0-100): how extreme an award is, used by roast.py to
+# decide which 2-3 awards get the Sonnet "headline" treatment vs. Haiku
+# "filler" treatment. Bespoke, history-aware formulas exist only for the
+# award titles below, where there's a clean numeric signal and a sensible
+# historical comparison pool (stats.season_metric_distribution +
+# severity_from_pool). Every other award gets the generic flat fallback —
+# new awards work out of the box, just routed to Haiku by default, until
+# someone adds a bespoke entry to _SEVERITY_FNS for them.
+# ----------------------------------------------------------------------
+
+def _margin_metric(season, wk, wd):
+    """roster_id -> the margin of its matchup that week (same value for
+    both teams in a pair) — the historical pool for Robbed/Coin-Flip King."""
+    out = {}
+    for ra, pa, rb, pb in S.matchup_pairs(wd):
+        m = abs(pa - pb)
+        out[ra] = m
+        out[rb] = m
+    return out
+
+
+def _median_deviation_metric(season, wk, wd):
+    """roster_id -> signed distance from that week's median score — the
+    historical pool for Bottom Feeders' "how far below median" framing."""
+    if not wd:
+        return {}
+    med = S.weekly_median(wd)
+    return {rid: wt.points - med for rid, wt in wd.items()}
+
+
+def _bench_points_metric(season, wk, wd):
+    return {rid: e.bench_points for rid, e in S.lineup_efficiency(season, wd).items()}
+
+
+def _severity_bench_warmer(award, ctx):
+    eff = ctx["efficiency"].get(award.winner_rid)
+    if not eff:
+        return 50.0
+    pool = S.season_metric_distribution(ctx["season"], _bench_points_metric, upto_week=ctx["week"])
+    return S.severity_from_pool(eff.bench_points, pool)
+
+
+def _severity_match_margin(award, ctx):
+    """Shared by Robbed and Coin-Flip King — both are about a "wrong"
+    result, and the closer the margin, the more dramatic the injustice/luck
+    (lost by half a point on a huge score reads as far more "robbed" than
+    losing by 20). So severity rises as margin SHRINKS, scaled against the
+    biggest margin seen this season as the ceiling — the opposite direction
+    from a blowout-margin severity."""
+    rid = award.winner_rid
+    margin = None
+    for ra, pa, rb, pb in ctx["pairs"]:
+        if rid in (ra, rb):
+            margin = abs(pa - pb)
+            break
+    if margin is None:
+        return 50.0
+    pool = S.season_metric_distribution(ctx["season"], _margin_metric, upto_week=ctx["week"])
+    if not pool:
+        return 50.0
+    ceiling = max(pool) or 1.0
+    return round(max(0.0, min(100.0, (1 - margin / ceiling) * 100)), 1)
+
+
+def _severity_bottom_feeders(award, ctx):
+    rid = award.winner_rid
+    score = ctx["scores"].get(rid)
+    if score is None:
+        return 50.0
+    median = S.weekly_median(ctx["week_data"])
+    pool = S.season_metric_distribution(ctx["season"], _median_deviation_metric, upto_week=ctx["week"])
+    return S.severity_from_pool(score - median, pool)
+
+
+def _severity_generic(award, ctx):
+    return 50.0
+
+
+_SEVERITY_FNS = {
+    "Bench Warmer of the Week": _severity_bench_warmer,
+    "Robbed": _severity_match_margin,
+    "Coin-Flip King": _severity_match_margin,
+    "Bottom Feeders": _severity_bottom_feeders,
+}
+
+
+def _attach_severity(results, ctx):
+    for a in results:
+        fn = _SEVERITY_FNS.get(a.title, _severity_generic)
+        try:
+            a.severity = fn(a, ctx)
+        except Exception:
+            a.severity = 50.0
+    return results
 
 
 # ----------------------------------------------------------------------
@@ -385,6 +497,7 @@ def compute_weekly(season, week):
                 results.append(a)
         except Exception as e:
             print(f"  [weekly award {fn.__name__} skipped: {e}]")
+    _attach_severity(results, ctx)
     return ctx, results
 
 
@@ -397,6 +510,8 @@ def compute_season(season):
         "trade_values": W.trade_value_by_team(season, weeks),
         "waiver_points": W.waiver_points_by_team(season, weeks),
         "faab_totals": W.faab_spent_by_team(season, weeks),
+        "best_pickup": W.best_pickup_period(season, weeks),
+        "best_trade": W.best_trade_period(season, weeks),
     }
     results = []
     for fn in SEASON_AWARDS:
@@ -406,6 +521,7 @@ def compute_season(season):
                 results.append(a)
         except Exception as e:
             print(f"  [season award {fn.__name__} skipped: {e}]")
+    _attach_severity(results, ctx)
     return ctx, results
 
 
@@ -565,6 +681,33 @@ def m_faabulous(ctx):
                  [(rid2, f"${a2}") for rid2, a2 in r[1:3]])
 
 
+def m_pickup_of_month(ctx):
+    """Best single waiver/FA add of the month — distinct from Waiver
+    Warrior's volume-across-all-pickups framing; this names one move."""
+    bp = ctx.get("best_pickup")
+    if not bp or bp.points_since <= 0:
+        return None
+    spend = f"${bp.faab}" if bp.faab else "free"
+    return Award("Pickup of the Month", "Best single waiver/FA add this month", "fame",
+                 bp.roster_id, f"{bp.player_name} ({spend}) → {bp.points_since:.1f} pts since", [],
+                 image_kind="player", player_id=bp.player_id)
+
+
+def m_best_trade(ctx):
+    """The month's most lopsided single trade, by points swing between the
+    two sides — distinct from The Mark's team-level net-across-all-trades
+    framing; this names one specific deal."""
+    to = ctx.get("best_trade")
+    if not to:
+        return None
+    season = ctx["season"]
+    note = " (plus draft pick(s), not valued here)" if to.trade.draft_picks else ""
+    val = (f"beat {season.team_name(to.loser_rid)} by {to.margin:+.1f} pts since "
+          f"({to.winner_value:+.1f} to {to.loser_value:+.1f}){note}")
+    return Award("Best Trade of the Month", "Most lopsided trade this month", "fame",
+                 to.winner_rid, val, [], image_kind="trade", loser_rid=to.loser_rid)
+
+
 def m_best_below_500(ctx):
     """Rewards a different skill than the top-line award: staying respectable
     on a team that's still losing more than it wins this month."""
@@ -664,6 +807,7 @@ def m_giant_killer(ctx):
 MONTHLY_AWARDS = [
     m_manager_of_month, m_biggest_climber, m_month_efficiency,
     m_hot_hand, m_month_high, m_wheeler_dealer, m_waiver_warrior, m_faabulous,
+    m_pickup_of_month, m_best_trade,
     m_best_below_500, m_lineup_wizard, m_bench_hero, m_closest_survivor,
     m_most_improved, m_giant_killer,
     m_wooden_spoon, m_biggest_faller, m_month_bumbler, m_the_mark, m_waiver_washout,
@@ -681,6 +825,8 @@ def compute_monthly(season, month_stats, prev_month_stats=None):
         "trade_values": W.trade_value_by_team(season, weeks),
         "waiver_points": W.waiver_points_by_team(season, weeks),
         "faab_totals": W.faab_spent_by_team(season, weeks),
+        "best_pickup": W.best_pickup_period(season, weeks),
+        "best_trade": W.best_trade_period(season, weeks),
     }
     results = []
     for fn in MONTHLY_AWARDS:
@@ -690,4 +836,5 @@ def compute_monthly(season, month_stats, prev_month_stats=None):
                 results.append(a)
         except Exception as e:
             print(f"  [monthly award {fn.__name__} skipped: {e}]")
+    _attach_severity(results, ctx)
     return ctx, results

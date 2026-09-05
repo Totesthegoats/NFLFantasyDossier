@@ -1,0 +1,11 @@
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = [
+    "E501",  # line length — this codebase favors long f-string lines
+    "E702",  # multiple statements on one line (semicolon) — used deliberately for compact one-liners
+    "E741",  # ambiguous variable name `l` — used throughout for win/loss/tie tuples (w, l, t)
+]
