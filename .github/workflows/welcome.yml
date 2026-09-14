@@ -5,7 +5,12 @@ on:
     # Daily 11:00 UTC — catches new sheet rows within a day or two
     # (trial.WELCOME_WINDOW_DAYS tolerates one missed/late run).
     - cron: "0 11 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      worksheet:
+        description: "Sheet tab to read (leave blank for the scheduled default: production)"
+        required: false
+        default: ""
 
 jobs:
   send:
@@ -37,6 +42,7 @@ jobs:
         run: |
           python -m sleeper_dossier.batch \
             --sheet "${{ secrets.SHEET_ID }}" \
+            --worksheet "${{ github.event.inputs.worksheet || 'production' }}" \
             --welcome-new \
             --email \
             --outdir reports
