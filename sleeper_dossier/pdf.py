@@ -32,13 +32,20 @@ _INSTALL_HINT = ("PDF export needs the 'playwright' package and its Chromium bro
                  "Install with: pip install playwright && playwright install chromium")
 
 
-def html_to_pdf(html: str, output_path: str, *, timeout_ms: int = 20_000) -> None:
+def html_to_pdf(html: str, output_path: str, *, timeout_ms: int = 20_000,
+                landscape: bool = True, format: str = "A4") -> None:
     """Convert `html` to a PDF at `output_path`.
 
     `timeout_ms` is the maximum time to wait for Chart.js to finish
     rendering all charts before the PDF is captured. Increase it for
     very large reports or slow machines. A warning is printed (not an
     error) if the timeout fires so the PDF is still written.
+
+    `landscape`/`format` are only the fallback page geometry — a page whose
+    own CSS declares an `@page` size (like pdf_render.py's paginated output)
+    overrides both via prefer_css_page_size below. For plain, non-paginated
+    HTML (no `@page` rule — e.g. draft_review.py's card grid), these are
+    what actually apply, so pass landscape=False for a portrait report.
     """
     if sync_playwright is None:
         raise RuntimeError(_INSTALL_HINT)
@@ -90,7 +97,8 @@ def html_to_pdf(html: str, output_path: str, *, timeout_ms: int = 20_000) -> Non
         # No margin dict here — @page { margin: 0; } handles it.
         page.pdf(
             path=output_path,
-            landscape=True,
+            format=format,
+            landscape=landscape,
             print_background=True,
             prefer_css_page_size=True,
         )

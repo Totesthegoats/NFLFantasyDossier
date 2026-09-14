@@ -161,7 +161,7 @@ def generate_one(league_id, month_arg=None, week_arg=None, do_season=False,
     return season, html_out, pdf_out, label
 
 
-def send_email(to_addr, subject, html_body):
+def _send_mail(to_addr, subject, text_body, html_body=None):
     """
     SMTP via env vars: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM.
     Sends real mail on your behalf — test against your own address first.
@@ -176,8 +176,9 @@ def send_email(to_addr, subject, html_body):
     msg["Subject"] = subject
     msg["From"] = sender
     msg["To"] = to_addr
-    msg.set_content("Your dossier is attached as HTML. Open it in a browser.")
-    msg.add_alternative(html_body, subtype="html")
+    msg.set_content(text_body)
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
 
     ctx = ssl.create_default_context()
     with smtplib.SMTP(host, port) as s:
@@ -185,6 +186,26 @@ def send_email(to_addr, subject, html_body):
         s.login(user, pw)
         s.send_message(msg)
     return True
+
+
+def send_email(to_addr, subject, html_body):
+    """Sends the dossier itself, as an inline HTML email."""
+    return _send_mail(to_addr, subject, "Your dossier is attached as HTML. Open it in a browser.", html_body)
+
+
+def send_trial_ended_email(to_addr, league_name):
+    """One-time notice sent the week a free-trial league's trial expires —
+    see trial.just_converted_to_free() for how "the week it expires" is
+    detected without a state file."""
+    weeks = T.TRIAL_DAYS // 7
+    subject = f"{league_name} — your free trial has ended"
+    body = (
+        f'Your {weeks}-week free trial of the full Sleeper Dossier for "{league_name}" has ended. '
+        f"You've been moved to the free tier, so you'll keep getting the weekly award cards — "
+        f"just without the standings, charts, luck leaderboard, and waiver/trade breakdown that "
+        f"came with the trial."
+    )
+    return _send_mail(to_addr, subject, body)
 
 
 def _slug(label):
@@ -271,6 +292,9 @@ def main(argv=None):
             if args.email and row["email"]:
                 send_email(row["email"], f"{season.name} - {period}", html_out)
                 print(f"     emailed {row['email']}")
+                if T.just_converted_to_free(row["tier"], row["signup_date"]):
+                    send_trial_ended_email(row["email"], season.name)
+                    print(f"     trial-ended notice sent to {row['email']}")
         except Exception as e:
             print(f"  x {label}: {e}", file=sys.stderr)
             failed += 1

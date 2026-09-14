@@ -6,5 +6,6 @@ assets/
 *_cards/
 __pycache__/
 *.pyc
+.venv/
 .cache/
 reports/

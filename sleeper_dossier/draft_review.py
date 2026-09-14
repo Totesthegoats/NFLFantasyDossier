@@ -23,6 +23,10 @@ so they look identical to the rest of the dossier):
 
 Usage:
     python -m sleeper_dossier.draft_review --league YOUR_LEAGUE_ID --html draft.html
+
+    # Also (or instead) write a PDF — portrait A4, since this is a plain
+    # card-grid page, not the paginated landscape layout pdf_render.py builds
+    python -m sleeper_dossier.draft_review --league YOUR_LEAGUE_ID --pdf draft.pdf
 """
 
 from __future__ import annotations
@@ -38,7 +42,7 @@ from . import data as D
 from . import render as RND
 from . import roast as R
 
-MODEL = "claude-opus-5"
+MODEL = "claude-sonnet-5"
 GRADE_MAX_TOKENS = 2048
 
 _GRADE_RE = re.compile(r"grade\s*:\s*([A-F][+-]?)", re.IGNORECASE)
@@ -428,12 +432,36 @@ def render_html(season, grades: dict, rounds: int, draft_awards: list | None = N
 </div></body></html>"""
 
 
+def _diagnose_client():
+    """Grading fails silently (grade='—' for every team, no explanation) if
+    the Claude client can't be built — print exactly why before that happens,
+    rather than leaving it to look like a broken feature."""
+    import os
+    if R.anthropic is None:
+        print("  [warn] the 'anthropic' package isn't installed in this Python environment "
+              "(pip install anthropic) — grades and Cherry Picker/Recipe for Disaster will be "
+              "skipped.", file=sys.stderr)
+        return
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        print("  [warn] ANTHROPIC_API_KEY is not set in this process's environment — grades and "
+              "Cherry Picker/Recipe for Disaster will be skipped. If you've exported it in a "
+              "shell, make sure this command is running in that same shell (an IDE task, venv, "
+              "or subprocess can easily not inherit it).", file=sys.stderr)
+        return
+    masked = f"{key[:10]}...{key[-4:]}" if len(key) > 14 else "(short/malformed)"
+    print(f"  Using ANTHROPIC_API_KEY {masked}", file=sys.stderr)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Grade every team's draft for a Sleeper league.")
     ap.add_argument("--league", required=True, help="Sleeper league ID")
     ap.add_argument("--html", metavar="PATH", help="Write HTML to PATH")
+    ap.add_argument("--pdf", metavar="PATH",
+                    help="Write PDF to PATH (requires: pip install playwright && playwright install chromium)")
     args = ap.parse_args(argv)
 
+    _diagnose_client()
     print(f"Fetching league {args.league}...", file=sys.stderr)
     season = D.fetch_season(args.league, fetch_transactions=False)
     if not season.draft_picks:
@@ -459,6 +487,11 @@ def main(argv=None):
         with open(args.html, "w", encoding="utf-8") as f:
             f.write(html_out)
         print(f"\nHTML written to {args.html}", file=sys.stderr)
+    if args.pdf:
+        from . import pdf as PDF
+        print("Generating PDF...", file=sys.stderr)
+        PDF.html_to_pdf(html_out, args.pdf, landscape=False)
+        print(f"PDF written to {args.pdf}", file=sys.stderr)
     return 0
 
 

@@ -112,11 +112,20 @@ email still generates its report, it just won't get sent.
 
 ### Free trial (`Teir` column)
 
-A row with `Teir` = `free` gets the **full-tier report** for its first 14
-days after `Date` (any of `YYYY-MM-DD`, `DD/MM/YYYY`, `MM/DD/YYYY`), then
-drops to the free-tier report (award cards only). `normal`/`dynasty` rows are
-unaffected — the trial only ever upgrades a declared tier, never downgrades
-it. See `trial.py`.
+A row with `Teir` = `free` gets the **full-tier report** for its first 4
+weeks (`trial.TRIAL_DAYS`, 28 days) after `Date` (any of `YYYY-MM-DD`,
+`DD/MM/YYYY`, `MM/DD/YYYY`), then drops to the free-tier report (award cards
+only). `normal`/`dynasty` rows are unaffected — the trial only ever upgrades
+a declared tier, never downgrades it. See `trial.py`.
+
+The week the trial ends, if `--email` is on and the row has an address, that
+league also gets a one-time "your free trial has ended" notice (separate
+from that week's dossier email). There's no state file tracking who's
+already been notified — batch.py runs on ephemeral GitHub Actions runners,
+so instead `trial.just_converted_to_free()` derives "did the trial end
+within roughly the last batch cycle" straight from the date math (a 7-day
+window matching the weekly cron), which survives a missed/late run without
+re-notifying every week after.
 
 The tier also controls `render_html`'s `tier=` argument directly if you're
 calling it outside batch mode: `"free"` renders award cards + recap only;
