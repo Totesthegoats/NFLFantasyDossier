@@ -162,7 +162,7 @@ def generate_one(league_id, month_arg=None, week_arg=None, do_season=False,
     return season, html_out, pdf_out, label
 
 
-def _send_mail(to_addr, subject, text_body, html_body=None):
+def _send_mail(to_addr, subject, text_body, html_body=None, attachment_path=None):
     """
     SMTP via env vars: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM.
     Sends real mail on your behalf — test against your own address first.
@@ -180,6 +180,10 @@ def _send_mail(to_addr, subject, text_body, html_body=None):
     msg.set_content(text_body)
     if html_body:
         msg.add_alternative(html_body, subtype="html")
+    if attachment_path:
+        with open(attachment_path, "rb") as fh:
+            msg.add_attachment(fh.read(), maintype="application", subtype="pdf",
+                               filename=os.path.basename(attachment_path))
 
     ctx = ssl.create_default_context()
     with smtplib.SMTP(host, port) as s:
@@ -189,9 +193,43 @@ def _send_mail(to_addr, subject, text_body, html_body=None):
     return True
 
 
-def send_email(to_addr, subject, html_body):
-    """Sends the dossier itself, as an inline HTML email."""
-    return _send_mail(to_addr, subject, "Your dossier is attached as HTML. Open it in a browser.", html_body)
+UPGRADE_URL = "https://waiver-wire-tap.com/"
+
+
+def _trial_banner(league_name: str, days_remaining: int) -> tuple[str, str]:
+    """Returns (html_snippet, text_line) reminding a trial league how long
+    they have left at full tier — shown on every dossier email while on
+    trial, not just a one-time notice at the end."""
+    weeks = T.TRIAL_DAYS // 7
+    if days_remaining <= T.BATCH_CYCLE_DAYS:
+        msg = (f'This is the last week of your {weeks}-week free trial for "{league_name}". '
+               f"Next week you'll move to the free tier — award cards only, no standings, "
+               f"charts, luck leaderboard, or waiver/trade breakdown.")
+    else:
+        msg = (f'You\'re on the free trial for "{league_name}" — {days_remaining} day(s) left '
+               f"before you move to the free tier.")
+    keep_it_text = f"Keep full access at {UPGRADE_URL}"
+    html = (f'<div style="background:#fff8e1;border:1px solid #f0c36d;border-radius:6px;'
+           f'padding:10px 14px;margin:0 0 16px;font:14px/1.4 -apple-system,sans-serif;'
+           f'color:#6b5300;">{msg} '
+           f'<a href="{UPGRADE_URL}" style="color:#6b5300;font-weight:600;">Keep full access &rarr;</a></div>')
+    return html, f"{msg} {keep_it_text}"
+
+
+def send_email(to_addr, subject, html_body, *, attachment_path=None, trial_note=None):
+    """Sends the dossier itself, as an inline HTML email.
+
+    trial_note, when given, is (html_snippet, text_line) from _trial_banner():
+    the html_snippet is spliced right after <body> in the emailed HTML (the
+    HTML/PDF saved to disk are left untouched), and the text_line is appended
+    to the plain-text alternative.
+    """
+    text_body = "Your dossier is attached as HTML. Open it in a browser."
+    if trial_note:
+        banner_html, banner_text = trial_note
+        html_body = html_body.replace("<body>", f"<body>{banner_html}", 1)
+        text_body = f"{text_body}\n\n{banner_text}"
+    return _send_mail(to_addr, subject, text_body, html_body, attachment_path=attachment_path)
 
 
 def send_trial_ended_email(to_addr, league_name):
@@ -204,9 +242,35 @@ def send_trial_ended_email(to_addr, league_name):
         f'Your {weeks}-week free trial of the full Sleeper Dossier for "{league_name}" has ended. '
         f"You've been moved to the free tier, so you'll keep getting the weekly award cards — "
         f"just without the standings, charts, luck leaderboard, and waiver/trade breakdown that "
-        f"came with the trial."
+        f"came with the trial.\n\n"
+        f"Want to keep full access? Upgrade at {UPGRADE_URL}"
     )
     return _send_mail(to_addr, subject, body)
+
+
+def send_welcome_email(to_addr, league_name, html_report, *, attachment_path=None):
+    """First email a league ever gets after showing up in the sheet — sent
+    once, within a day or two of signup (see trial.is_new_signup). Leads with
+    a clear "you're on the trial" message, then includes the most recently
+    completed week's report so day one isn't a cold start."""
+    weeks = T.TRIAL_DAYS // 7
+    subject = f"Welcome to Sleeper Dossier — {league_name} is on the trial"
+    text_body = (
+        f'Welcome to Sleeper Dossier! "{league_name}" has just been added to the full '
+        f"premium tier for a {weeks}-week free trial — standings, charts, the luck "
+        f"leaderboard, waiver/trade breakdown, and roasts, all included. Here's last "
+        f"week's report to kick things off.\n\n"
+        f"Keep full access after the trial at {UPGRADE_URL}"
+    )
+    banner_html = (
+        f'<div style="background:#eaf6ea;border:1px solid #8fc98f;border-radius:6px;'
+        f'padding:10px 14px;margin:0 0 16px;font:14px/1.4 -apple-system,sans-serif;'
+        f'color:#245c24;">Welcome! "{league_name}" has been added to the full premium tier '
+        f'for a {weeks}-week free trial — enjoy the full report below. '
+        f'<a href="{UPGRADE_URL}" style="color:#245c24;font-weight:600;">Keep full access &rarr;</a></div>'
+    )
+    html_body = html_report.replace("<body>", f"<body>{banner_html}", 1)
+    return _send_mail(to_addr, subject, text_body, html_body, attachment_path=attachment_path)
 
 
 def _slug(label):
@@ -245,7 +309,7 @@ def _load_leagues(args):
     deduplicated by league_id (first occurrence wins)."""
     if args.sheet:
         from . import sheet as SH
-        raw = SH.load_rows(args.sheet)
+        raw = SH.load_rows(args.sheet, worksheet=args.worksheet)
         rows = [{
             "league_id": str(r.get("league_id", "")).strip(),
             "label": str(r.get("league_id", "")).strip(),
@@ -266,11 +330,86 @@ def _load_leagues(args):
     return _dedupe_leagues(rows)
 
 
+def _run_welcome(args, leagues):
+    """--welcome-new: send a one-time welcome email (latest completed week's
+    report + a "you're on the trial" note) to sheet rows whose signup date
+    is recent (trial.is_new_signup). Meant for a separate daily cron from
+    the weekly --week latest run in main() below — always uses the latest
+    completed week regardless of --month/--season/--week.
+
+    Skipped entirely for --csv sources: _load_leagues() gives CSV rows an
+    empty signup_date, so is_new_signup() never matches and nothing would
+    ever be welcomed."""
+    if not args.sheet:
+        print("--welcome-new needs --sheet (CSV rows have no signup date, so "
+              "nothing would ever count as new) — skipping", file=sys.stderr)
+        return 0
+    if not args.email:
+        print("--welcome-new does nothing without --email — skipping", file=sys.stderr)
+        return 0
+
+    if args.pdf:
+        from . import pdf as PDF
+    os.makedirs(args.outdir, exist_ok=True)
+
+    ok, failed, invalid, bad_email = 0, 0, 0, 0
+    for row in leagues:
+        if not T.is_new_signup(row["signup_date"]):
+            continue
+        lid = row["league_id"]
+        label = row["label"] or lid
+        if not _looks_like_email(row["email"]):
+            print(f"  ! {label}: '{row['email']}' doesn't look like a valid email — skipping welcome",
+                  file=sys.stderr)
+            bad_email += 1
+            continue
+        if not D.validate_league_id(lid):
+            print(f"  ! {label}: '{lid}' is not a valid Sleeper league ID — skipping", file=sys.stderr)
+            invalid += 1
+            continue
+        tier = T.effective_tier(row["tier"], row["signup_date"])
+        try:
+            season, html_out, pdf_out, period = generate_one(
+                lid, week_arg="latest", do_roast=not args.no_roast, do_pdf=args.pdf, tier=tier)
+            if not html_out:
+                print(f"  ! {label}: no data for period — skipping welcome", file=sys.stderr)
+                failed += 1
+                continue
+        except Exception as e:
+            print(f"  x {label}: {e}", file=sys.stderr)
+            failed += 1
+            continue
+
+        pdf_path = None
+        if args.pdf and pdf_out:
+            pdf_path = os.path.join(args.outdir, f"{lid}_welcome.pdf")
+            try:
+                PDF.html_to_pdf(pdf_out, pdf_path)
+            except Exception as pe:
+                print(f"     pdf failed: {pe}", file=sys.stderr)
+                pdf_path = None
+
+        try:
+            send_welcome_email(row["email"], season.name, html_out, attachment_path=pdf_path)
+            print(f"  ok {label}: welcomed {row['email']} ({period})")
+            ok += 1
+        except Exception as e:
+            print(f"     welcome email failed for {row['email']}: {e}", file=sys.stderr)
+            bad_email += 1
+
+    print(f"\nWelcome run done: {ok} welcomed, {failed} failed, {invalid} invalid league ID(s), "
+          f"{bad_email} email(s) skipped/failed.", file=sys.stderr)
+    return 0 if failed == 0 and invalid == 0 and bad_email == 0 else 2
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Batch-generate Sleeper dossiers (weekly/monthly/season).")
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--csv", help="leagues.csv (league_id,label,email)")
     src.add_argument("--sheet", help="Google Sheet ID (columns: Date, email, league_id, Teir)")
+    ap.add_argument("--worksheet", default=None,
+                    help="Tab name within --sheet to read (default: the sheet's first tab). "
+                         "Ignored when using --csv.")
     ap.add_argument("--month", default=None, help="Month YYYY-MM (default: latest completed)")
     ap.add_argument("--season", action="store_true", help="End-of-season reviews")
     ap.add_argument("--week", default=None,
@@ -281,14 +420,22 @@ def main(argv=None):
                     help="Also write a PDF alongside each HTML (requires playwright + chromium).")
     ap.add_argument("--email", action="store_true",
                     help="Email each report (requires SMTP_* env vars). Sends real mail.")
+    ap.add_argument("--welcome-new", action="store_true",
+                    help="Instead of the normal run, email a one-time welcome (latest "
+                         "completed week's report + trial note) to --sheet rows whose "
+                         "signup date is recent. Meant for a separate daily cron; requires "
+                         "--sheet and --email, and ignores --month/--season/--week.")
     ap.add_argument("--no-roast", action="store_true")
     args = ap.parse_args(argv)
 
-    if args.pdf:
-        from . import pdf as PDF
-
     os.makedirs(args.outdir, exist_ok=True)
     leagues = _load_leagues(args)
+
+    if args.welcome_new:
+        return _run_welcome(args, leagues)
+
+    if args.pdf:
+        from . import pdf as PDF
 
     ok, failed, invalid, bad_email = 0, 0, 0, 0
     for row in leagues:
@@ -299,6 +446,7 @@ def main(argv=None):
             invalid += 1
             continue
         tier = T.effective_tier(row["tier"], row["signup_date"])
+        pdf_path = None
         try:
             season, html_out, pdf_out, period = generate_one(
                 lid, month_arg=args.month, week_arg=args.week, do_season=args.season,
@@ -319,6 +467,7 @@ def main(argv=None):
                     print(f"     pdf: {pdf_path}")
                 except Exception as pe:
                     print(f"     pdf failed: {pe}", file=sys.stderr)
+                    pdf_path = None
         except Exception as e:
             print(f"  x {label}: {e}", file=sys.stderr)
             failed += 1
@@ -334,8 +483,12 @@ def main(argv=None):
                 bad_email += 1
             else:
                 try:
-                    send_email(row["email"], f"{season.name} - {period}", html_out)
-                    print(f"     emailed {row['email']}")
+                    days_left = T.trial_days_remaining(row["tier"], row["signup_date"])
+                    trial_note = _trial_banner(season.name, days_left) if days_left is not None else None
+                    send_email(row["email"], f"{season.name} - {period}", html_out,
+                              attachment_path=pdf_path, trial_note=trial_note)
+                    print(f"     emailed {row['email']}" + (" (+pdf)" if pdf_path else "")
+                          + (" (+trial reminder)" if trial_note else ""))
                     if T.just_converted_to_free(row["tier"], row["signup_date"]):
                         send_trial_ended_email(row["email"], season.name)
                         print(f"     trial-ended notice sent to {row['email']}")

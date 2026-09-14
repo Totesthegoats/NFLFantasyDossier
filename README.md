@@ -82,6 +82,9 @@ python -m sleeper_dossier.batch --csv leagues.csv --week 5 --pdf
 ```
 
 Email requires: `SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM`.
+When both `--pdf` and `--email` are given, the generated PDF is attached to
+that league's email (in addition to the inline HTML body) — if the PDF
+render fails, the email still sends with just the HTML.
 
 ### Sourcing the league list from a Google Sheet
 
@@ -90,6 +93,14 @@ Email requires: `SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM`.
 
 ```bash
 python -m sleeper_dossier.batch --sheet 1QZ-vewj...Y2k --week latest --email
+```
+
+`--sheet` picks the spreadsheet (workbook); `--worksheet NAME` picks which tab
+inside it to read (default: the first tab). Use this if your workbook has
+more than one tab, e.g. one per season:
+
+```bash
+python -m sleeper_dossier.batch --sheet 1QZ-vewj...Y2k --worksheet "2026 Leagues" --week latest --email
 ```
 
 Setup (one-time):
@@ -129,14 +140,22 @@ weeks (`trial.TRIAL_DAYS`, 28 days) after `Date` (any of `YYYY-MM-DD`,
 only). `normal`/`dynasty` rows are unaffected — the trial only ever upgrades
 a declared tier, never downgrades it. See `trial.py`.
 
-The week the trial ends, if `--email` is on and the row has an address, that
-league also gets a one-time "your free trial has ended" notice (separate
-from that week's dossier email). There's no state file tracking who's
-already been notified — batch.py runs on ephemeral GitHub Actions runners,
-so instead `trial.just_converted_to_free()` derives "did the trial end
-within roughly the last batch cycle" straight from the date math (a 7-day
-window matching the weekly cron), which survives a missed/late run without
-re-notifying every week after.
+Every week a trial league's dossier email goes out, it carries a small
+banner (`batch._trial_banner`) reminding them they're on the trial and how
+many days are left — spliced into the emailed HTML only, not into the
+saved `.html`/`.pdf` files. In the trial's final week (≤ 7 days left) the
+wording switches to "this is your last week of full access" instead of a
+plain day count.
+
+The week the trial actually ends, if `--email` is on and the row has an
+address, that league also gets a one-time "your free trial has ended"
+notice (separate from that week's dossier email, and from the weekly
+reminder banner above). There's no state file tracking who's already been
+notified — batch.py runs on ephemeral GitHub Actions runners, so instead
+`trial.just_converted_to_free()` derives "did the trial end within roughly
+the last batch cycle" straight from the date math (a 7-day window matching
+the weekly cron), which survives a missed/late run without re-notifying
+every week after.
 
 The tier also controls `render_html`'s `tier=` argument directly if you're
 calling it outside batch mode: `"free"` renders award cards + recap only;
@@ -144,19 +163,40 @@ calling it outside batch mode: `"free"` renders award cards + recap only;
 leaderboard, waiver/trades). Dynasty-specific features don't exist yet, so
 `"dynasty"` currently renders identically to `"normal"`.
 
+### Welcoming new signups (`--welcome-new`)
+
+```bash
+python -m sleeper_dossier.batch --sheet SHEET_ID --welcome-new --email --outdir reports
+```
+
+Meant to run daily, separately from the weekly report. Each run scans the
+sheet for rows whose `Date` is recent (`trial.is_new_signup`, a 2-day
+window so one missed daily run doesn't skip anyone) and, for each match,
+sends a one-time welcome email: a "you've been added to the full premium
+tier for a 4-week free trial" note, followed by that league's most recently
+completed week's report (always the latest week, regardless of
+`--month`/`--season`/`--week`). Does nothing for `--csv` sources (CSV rows
+have no signup date) and does nothing without `--email`. There's no state
+file marking who's been welcomed — like the rest of the trial logic, it's
+derived purely from `Date` so it's safe to run on ephemeral GitHub Actions
+runners.
+
+`.github/workflows/welcome.yml` runs this daily; it shares the same repo
+secrets as the weekly workflow below.
+
 ### Running it on a schedule
 
-`.github/workflows/dossier.yml` runs the batch weekly (Tuesdays, after MNF)
-via GitHub Actions. It needs these repo secrets (Settings → Secrets and
-variables → Actions):
+`.github/workflows/dossier.yml` runs the batch weekly (Tuesdays, after MNF);
+`.github/workflows/welcome.yml` runs `--welcome-new` daily. Both need these
+repo secrets (Settings → Secrets and variables → Actions):
 
 - `SHEET_ID` — the Google Sheet ID (the long string in its URL)
 - `GOOGLE_SHEETS_CREDENTIALS_JSON` — the full contents of the service account JSON key
 - `ANTHROPIC_API_KEY` — omit to send reports without the roast layer
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`
 
-Trigger a run manually from the Actions tab (`workflow_dispatch`) to test
-before waiting for the schedule.
+Trigger either one manually from the Actions tab (`workflow_dispatch`) to
+test before waiting for the schedule.
 
 ## Draft review (standalone)
 

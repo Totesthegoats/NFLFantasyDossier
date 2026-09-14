@@ -1,0 +1,42 @@
+name: Welcome new signups
+
+on:
+  schedule:
+    # Daily 11:00 UTC — catches new sheet rows within a day or two
+    # (trial.WELCOME_WINDOW_DAYS tolerates one missed/late run).
+    - cron: "0 11 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write service account key
+        run: echo "$GOOGLE_SHEETS_CREDENTIALS_JSON" > /tmp/gsheets-key.json
+        env:
+          GOOGLE_SHEETS_CREDENTIALS_JSON: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS_JSON }}
+
+      - name: Welcome any new signups
+        env:
+          GOOGLE_SHEETS_CREDENTIALS: /tmp/gsheets-key.json
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+        run: |
+          python -m sleeper_dossier.batch \
+            --sheet "${{ secrets.SHEET_ID }}" \
+            --welcome-new \
+            --email \
+            --outdir reports

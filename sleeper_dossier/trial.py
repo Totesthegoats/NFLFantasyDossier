@@ -59,7 +59,7 @@ def _days_since_signup(signup_date: str, today: datetime) -> int | None:
     try:
         signup = _parse_date(signup_date)
     except ValueError as e:
-        print(f"  [trial: {e}, treating as free]")
+        print(f"  [trial: {e}]")
         return None
     return (today - signup).days
 
@@ -77,6 +77,21 @@ def effective_tier(declared_tier: str | None, signup_date: str | None, today: da
     return declared
 
 
+def trial_days_remaining(declared_tier: str | None, signup_date: str | None, today: datetime | None = None) -> int | None:
+    """Days left in a free-trial league's full-tier window, or None if the
+    league isn't currently on trial (declared tier isn't "free", no/unparseable
+    signup_date, or the trial has already ended). Used to remind trial leagues
+    every week — via their regular dossier email — how long they have left."""
+    declared = normalize_tier(declared_tier)
+    if declared != "free" or not signup_date:
+        return None
+    today = today or datetime.utcnow()
+    days = _days_since_signup(signup_date, today)
+    if days is None or days >= TRIAL_DAYS:
+        return None
+    return TRIAL_DAYS - days
+
+
 def just_converted_to_free(declared_tier: str | None, signup_date: str | None, today: datetime | None = None) -> bool:
     """True only in the run(s) shortly after a free-trial league's trial
     expires — TRIAL_DAYS <= days_since_signup < TRIAL_DAYS + BATCH_CYCLE_DAYS.
@@ -90,3 +105,24 @@ def just_converted_to_free(declared_tier: str | None, signup_date: str | None, t
     if days is None:
         return False
     return TRIAL_DAYS <= days < TRIAL_DAYS + BATCH_CYCLE_DAYS
+
+
+# How often the "welcome new signups" cron runs (welcome.yml: daily). The
+# window below is wider than the cadence (2 days, not 1) so a signup still
+# gets welcomed even if one day's run is late or fails to fire.
+WELCOME_WINDOW_DAYS = 2
+
+
+def is_new_signup(signup_date: str | None, today: datetime | None = None) -> bool:
+    """True if signup_date falls within the last WELCOME_WINDOW_DAYS days —
+    used to spot sheet rows that just appeared, so batch.py's --welcome-new
+    mode can send a one-time welcome email. Same stateless approach as
+    just_converted_to_free(): no record of who's already been welcomed, just
+    "is this signup recent" from date math."""
+    if not signup_date:
+        return False
+    today = today or datetime.utcnow()
+    days = _days_since_signup(signup_date, today)
+    if days is None:
+        return False
+    return 0 <= days < WELCOME_WINDOW_DAYS
