@@ -9,7 +9,8 @@ on:
       worksheet:
         description: "Sheet tab to read (leave blank for the scheduled default: production)"
         required: false
-        default: "Test
+        default: "Test"
+
 jobs:
   send:
     runs-on: ubuntu-latest
