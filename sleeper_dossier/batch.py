@@ -273,8 +273,15 @@ def send_welcome_email(to_addr, league_name, html_report, *, attachment_path=Non
     return _send_mail(to_addr, subject, text_body, html_body, attachment_path=attachment_path)
 
 
-def _slug(label):
-    return label.lower().replace(" ", "_").replace("/", "-")
+_UNSAFE_FILENAME_RE = re.compile(r'[\\/:*?"<>|]+')
+
+
+def _dossier_filename(league_name: str, ext: str) -> str:
+    """"<League Name>-Dossier.<ext>" — keeps the league's own spacing/casing
+    (recipients see this as the email attachment name), just strips
+    characters that are illegal in file names on Windows/macOS/Linux."""
+    safe = _UNSAFE_FILENAME_RE.sub("", league_name).strip() or "League"
+    return f"{safe}-Dossier.{ext}"
 
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -304,6 +311,18 @@ def _dedupe_leagues(rows: list) -> list:
     return out
 
 
+_NON_DIGIT_RE = re.compile(r"\D+")
+
+
+def _clean_league_id(raw) -> str:
+    """Strips every non-digit character — Sleeper league IDs are always
+    numeric, so this survives common paste artifacts: whitespace, a trailing
+    slash, or even a whole league URL (".../leagues/123.../") instead of
+    just the ID. Sleeper-specific: a future non-Sleeper source (e.g. Yahoo)
+    would need its own cleaning, since those IDs aren't purely numeric."""
+    return _NON_DIGIT_RE.sub("", str(raw or ""))
+
+
 def _load_leagues(args):
     """Returns a list of {league_id, label, email, tier, signup_date},
     deduplicated by league_id (first occurrence wins)."""
@@ -311,18 +330,18 @@ def _load_leagues(args):
         from . import sheet as SH
         raw = SH.load_rows(args.sheet, worksheet=args.worksheet)
         rows = [{
-            "league_id": str(r.get("league_id", "")).strip(),
-            "label": str(r.get("league_id", "")).strip(),
+            "league_id": _clean_league_id(r.get("league_id")),
+            "label": _clean_league_id(r.get("league_id")),
             "email": str(r.get("email", "")).strip(),
             "tier": str(r.get("Teir", "")).strip(),
             "signup_date": str(r.get("Date", "")).strip(),
-        } for r in raw if str(r.get("league_id", "")).strip()]
+        } for r in raw if _clean_league_id(r.get("league_id"))]
     else:
         with open(args.csv) as f:
             raw = list(csv.DictReader(f))
         rows = [{
-            "league_id": row["league_id"].strip(),
-            "label": (row.get("league_label") or row["league_id"]).strip(),
+            "league_id": _clean_league_id(row["league_id"]),
+            "label": (row.get("league_label") or "").strip() or _clean_league_id(row["league_id"]),
             "email": (row.get("email") or "").strip(),
             "tier": "normal",
             "signup_date": "",
@@ -382,7 +401,7 @@ def _run_welcome(args, leagues):
 
         pdf_path = None
         if args.pdf and pdf_out:
-            pdf_path = os.path.join(args.outdir, f"{lid}_welcome.pdf")
+            pdf_path = os.path.join(args.outdir, _dossier_filename(season.name, "pdf"))
             try:
                 PDF.html_to_pdf(pdf_out, pdf_path)
             except Exception as pe:
@@ -455,7 +474,7 @@ def main(argv=None):
                 print(f"  ! {label}: no data for period", file=sys.stderr)
                 failed += 1
                 continue
-            path = os.path.join(args.outdir, f"{lid}_{_slug(period)}.html")
+            path = os.path.join(args.outdir, _dossier_filename(season.name, "html"))
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(html_out)
             print(f"  ok {label} ({tier}): {path}")

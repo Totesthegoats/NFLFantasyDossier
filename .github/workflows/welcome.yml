@@ -25,6 +25,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Install Playwright Chromium (for --pdf)
+        run: playwright install --with-deps chromium
+
       - name: Write service account key
         run: echo "$GOOGLE_SHEETS_CREDENTIALS_JSON" > /tmp/gsheets-key.json
         env:
@@ -45,4 +48,5 @@ jobs:
             --worksheet "${{ github.event.inputs.worksheet || 'production' }}" \
             --welcome-new \
             --email \
+            --pdf \
             --outdir reports
