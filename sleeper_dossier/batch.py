@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import re
 import smtplib
 import ssl
 import sys
@@ -212,28 +213,57 @@ def _slug(label):
     return label.lower().replace(" ", "_").replace("/", "-")
 
 
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _looks_like_email(addr: str) -> bool:
+    """Cheap sanity check, not RFC 5322 validation — just enough to catch
+    blanks, typos, and placeholder junk ('N/A', 'none', 'asdf') before an
+    SMTP call is even attempted."""
+    return bool(_EMAIL_RE.match((addr or "").strip()))
+
+
+def _dedupe_leagues(rows: list) -> list:
+    """Keep the first row per league_id; warn about the rest. A duplicate
+    row would otherwise fetch the same league and send its email twice in
+    one run."""
+    seen: set[str] = set()
+    out = []
+    for row in rows:
+        lid = row["league_id"]
+        if lid in seen:
+            print(f"  ! duplicate league_id '{lid}' ({row['label'] or lid}) — "
+                  f"keeping the first row, skipping this one", file=sys.stderr)
+            continue
+        seen.add(lid)
+        out.append(row)
+    return out
+
+
 def _load_leagues(args):
-    """Returns a list of {league_id, label, email, tier, signup_date}."""
+    """Returns a list of {league_id, label, email, tier, signup_date},
+    deduplicated by league_id (first occurrence wins)."""
     if args.sheet:
         from . import sheet as SH
-        rows = SH.load_rows(args.sheet)
-        return [{
+        raw = SH.load_rows(args.sheet)
+        rows = [{
             "league_id": str(r.get("league_id", "")).strip(),
             "label": str(r.get("league_id", "")).strip(),
             "email": str(r.get("email", "")).strip(),
             "tier": str(r.get("Teir", "")).strip(),
             "signup_date": str(r.get("Date", "")).strip(),
-        } for r in rows if str(r.get("league_id", "")).strip()]
-
-    with open(args.csv) as f:
-        rows = list(csv.DictReader(f))
-    return [{
-        "league_id": row["league_id"].strip(),
-        "label": (row.get("league_label") or row["league_id"]).strip(),
-        "email": (row.get("email") or "").strip(),
-        "tier": "normal",
-        "signup_date": "",
-    } for row in rows]
+        } for r in raw if str(r.get("league_id", "")).strip()]
+    else:
+        with open(args.csv) as f:
+            raw = list(csv.DictReader(f))
+        rows = [{
+            "league_id": row["league_id"].strip(),
+            "label": (row.get("league_label") or row["league_id"]).strip(),
+            "email": (row.get("email") or "").strip(),
+            "tier": "normal",
+            "signup_date": "",
+        } for row in raw]
+    return _dedupe_leagues(rows)
 
 
 def main(argv=None):
@@ -260,7 +290,7 @@ def main(argv=None):
     os.makedirs(args.outdir, exist_ok=True)
     leagues = _load_leagues(args)
 
-    ok, failed, invalid = 0, 0, 0
+    ok, failed, invalid, bad_email = 0, 0, 0, 0
     for row in leagues:
         lid = row["league_id"]
         label = row["label"] or lid
@@ -289,18 +319,33 @@ def main(argv=None):
                     print(f"     pdf: {pdf_path}")
                 except Exception as pe:
                     print(f"     pdf failed: {pe}", file=sys.stderr)
-            if args.email and row["email"]:
-                send_email(row["email"], f"{season.name} - {period}", html_out)
-                print(f"     emailed {row['email']}")
-                if T.just_converted_to_free(row["tier"], row["signup_date"]):
-                    send_trial_ended_email(row["email"], season.name)
-                    print(f"     trial-ended notice sent to {row['email']}")
         except Exception as e:
             print(f"  x {label}: {e}", file=sys.stderr)
             failed += 1
+            continue
 
-    print(f"\nDone: {ok} generated, {failed} failed, {invalid} invalid league ID(s).", file=sys.stderr)
-    return 0 if failed == 0 and invalid == 0 else 2
+        # Email is sent outside the block above on purpose: a send failure
+        # here shouldn't retroactively turn an already-successful generation
+        # into a "failed" one — it gets its own counter instead.
+        if args.email and row["email"]:
+            if not _looks_like_email(row["email"]):
+                print(f"  ! {label}: '{row['email']}' doesn't look like a valid email — skipping send",
+                      file=sys.stderr)
+                bad_email += 1
+            else:
+                try:
+                    send_email(row["email"], f"{season.name} - {period}", html_out)
+                    print(f"     emailed {row['email']}")
+                    if T.just_converted_to_free(row["tier"], row["signup_date"]):
+                        send_trial_ended_email(row["email"], season.name)
+                        print(f"     trial-ended notice sent to {row['email']}")
+                except Exception as e:
+                    print(f"     email failed for {row['email']}: {e}", file=sys.stderr)
+                    bad_email += 1
+
+    print(f"\nDone: {ok} generated, {failed} failed, {invalid} invalid league ID(s), "
+          f"{bad_email} email(s) skipped/failed.", file=sys.stderr)
+    return 0 if failed == 0 and invalid == 0 and bad_email == 0 else 2
 
 
 if __name__ == "__main__":

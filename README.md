@@ -106,9 +106,20 @@ is what the scheduled automation uses (see below).
 Every row's `league_id` is checked against Sleeper (`data.validate_league_id`)
 before it's used — a typo'd, made-up, or no-longer-existing ID is skipped with
 a clear `not a valid Sleeper league ID` message instead of a raw HTTP error
-buried in a stack trace, and counted separately in the run summary. Bad
-`email` values aren't checked — a row with a working league_id and a broken
-email still generates its report, it just won't get sent.
+buried in a stack trace, and counted separately in the run summary.
+
+Two more sheet/CSV hygiene checks, both counted separately in the summary
+rather than silently dropped:
+- **Duplicate `league_id` rows** — only the first row for a given league is
+  kept (`batch._dedupe_leagues`); repeats are skipped with a warning, so a
+  copy-pasted row can't fetch the same league and send the same email twice
+  in one run.
+- **`email` format** — a lightweight sanity check (`batch._looks_like_email`,
+  not full RFC validation), just enough to catch blanks and obvious junk
+  ("N/A", "asdf") before an SMTP call is even attempted. A row with a working
+  league_id and a broken email still generates its report — it just won't
+  get sent, and that failure never retroactively counts the report itself
+  as failed.
 
 ### Free trial (`Teir` column)
 
