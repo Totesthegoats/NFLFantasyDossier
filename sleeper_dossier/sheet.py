@@ -24,10 +24,27 @@ def load_rows(sheet_id: str, worksheet: str | None = None) -> list[dict]:
     """Returns one dict per data row, keyed by the sheet's header row."""
     import gspread
     from google.oauth2.service_account import Credentials
+    from gspread.exceptions import WorksheetNotFound
 
     creds_path = os.environ["GOOGLE_SHEETS_CREDENTIALS"]
     creds = Credentials.from_service_account_file(creds_path, scopes=_SCOPES)
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(sheet_id)
-    ws = sh.worksheet(worksheet) if worksheet else sh.sheet1
+
+    if not worksheet:
+        ws = sh.sheet1
+    else:
+        try:
+            ws = sh.worksheet(worksheet)
+        except WorksheetNotFound:
+            # Case-insensitive fallback — "Production" vs "production" is an
+            # easy mismatch between a tab's real name and the value passed
+            # on the CLI/in a workflow secret.
+            all_ws = sh.worksheets()
+            match = next((w for w in all_ws if w.title.lower() == worksheet.lower()), None)
+            if match is None:
+                available = ", ".join(w.title for w in all_ws)
+                raise WorksheetNotFound(
+                    f"{worksheet!r} (available tabs: {available})") from None
+            ws = match
     return ws.get_all_records()
