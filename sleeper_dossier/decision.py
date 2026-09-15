@@ -364,7 +364,11 @@ def enrich_lineups(season, week: int) -> tuple[list[PlayerLine], float, float, l
       2. Sleeper weekly pre-game projection — cross-season fallback (no crosswalk needed)
       3. 0.0 — genuinely unknown; player excluded from regression awards/scatter
 
-    projected_pts: Sleeper-native trailing 4-week average (always available).
+    projected_pts source priority:
+      1. nflverse trailing model (same season year)
+      2. Sleeper-native trailing 4-week average of this season's scores
+      3. Sleeper weekly pre-game projection — the only option in week 1, when
+         there is no prior scoring history to average.
 
     Snap filter: import_snap_counts() loaded regardless of same_year — it works
     even when import_weekly_data() returns 404 (different nflverse artifact).
@@ -395,6 +399,12 @@ def enrich_lineups(season, week: int) -> tuple[list[PlayerLine], float, float, l
                   "regression scatter will show placeholder.")
 
     sleeper_proj_map = _sleeper_trailing_projections(season, week)
+    # Week 1 has no prior scoring history, so both trailing models come back
+    # empty and every projection would be 0.0 — blanking the decision scatter
+    # and making the gut-call awards meaningless. Sleeper's pre-game weekly
+    # projection is the right stand-in: it projects exactly this week.
+    if not sleeper_proj_map and not sleeper_week_proj:
+        sleeper_week_proj = _load_sleeper_week_projections(season_year, week)
     snap_eligible_set = _load_snap_filter(season_year, week)
 
     wd = season.weeks.get(week, {})
@@ -436,6 +446,8 @@ def enrich_lineups(season, week: int) -> tuple[list[PlayerLine], float, float, l
                     if (gsis and nfl_proj_map and not is_dst) else 0.0)
             if proj <= 0.0:
                 proj = sleeper_proj_map.get(pid, 0.0)
+            if proj <= 0.0 and not is_dst:
+                proj = sleeper_week_proj.get(str(pid), 0.0)
 
             if not is_dst:
                 exp = (exp_map.get(gsis) if (same_year and gsis)

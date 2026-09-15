@@ -229,6 +229,23 @@ def _fetch_week_transactions(league_id: str, week: int):
     return waivers, trades
 
 
+def _nfl_state() -> dict:
+    """Sleeper's league-wide NFL state. Best-effort: a failure here just means
+    we fall back to probing every regular-season week."""
+    try:
+        return _get(f"{API}/state/nfl") or {}
+    except requests.RequestException:
+        return {}
+
+
+def _week_was_played(wd: dict) -> bool:
+    """Sleeper serves a full matchup payload for weeks that haven't happened
+    yet — every roster present, starters already slotted, every score 0.0. A
+    non-empty response therefore isn't evidence the week was played; actual
+    scoring is."""
+    return any((t.points or 0) > 0 for t in wd.values())
+
+
 def _fetch_draft_picks(draft_id: str) -> dict:
     """player_id -> draft slot info for this league's draft. Best-effort:
     leagues with no recorded draft (or a draft_id Sleeper hasn't populated
@@ -255,10 +272,18 @@ def fetch_season(league_id: str, fetch_transactions: bool = True) -> SeasonData:
     players = _load_players()
     teams = _build_teams(rosters, users)
 
+    # Only probe weeks that could plausibly have been played: for the season
+    # currently under way that's up to and including the live week, and for a
+    # finished season the full regular season.
+    last_week = _LAST_REGULAR_SEASON_WEEK
+    state = _nfl_state()
+    if state.get("season") and str(state["season"]) == str(league.get("season") or ""):
+        last_week = min(last_week, int(state.get("week") or _LAST_REGULAR_SEASON_WEEK))
+
     weeks = {}
-    for wk in range(1, _LAST_REGULAR_SEASON_WEEK + 1):
+    for wk in range(1, last_week + 1):
         wd = _fetch_week(league_id, wk)
-        if wd:
+        if wd and _week_was_played(wd):
             weeks[wk] = wd
 
     transactions, trades = [], []
