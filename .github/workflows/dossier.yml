@@ -2,8 +2,10 @@ name: Weekly dossier
 
 on:
   schedule:
-    # Tuesday 11:00 UTC — after Monday Night Football has settled.
-    - cron: "0 11 * * 2"
+    # Tuesday 17:00 UTC (6pm BST / 5pm GMT) — well clear of Monday Night
+    # Football, and late enough to leave the morning free for fixes before
+    # anything goes out. GitHub cron is always UTC and does not follow DST.
+    - cron: "0 17 * * 2"
   workflow_dispatch:
     inputs:
       worksheet:
