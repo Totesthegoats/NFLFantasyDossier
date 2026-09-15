@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import html as html_mod
 import re
 import smtplib
 import ssl
@@ -56,16 +57,19 @@ from . import trial as T
 
 def generate_one(league_id, month_arg=None, week_arg=None, do_season=False,
                  do_roast=True, do_pdf=False, tier="normal"):
-    """Returns (season, html, pdf_html, period_label) or (season, None, None, None).
-    pdf_html is None when do_pdf=False."""
+    """Returns (season, html, pdf_html, period_label, email_html), or that shape
+    with Nones when there's nothing to report. pdf_html is None when do_pdf=False.
+
+    email_html is the slim, email-client-safe teaser (see render.render_email_html)
+    — NOT the full dossier, which is far too large to send inline."""
     season = D.fetch_season(league_id)
     if not season.weeks:
-        return None, None, None, None
+        return None, None, None, None, None
 
     if week_arg:
         week = max(season.weeks.keys()) if week_arg == "latest" else int(week_arg)
         if week not in season.weeks:
-            return season, None, None, None
+            return season, None, None, None, None
         _ctx, awards = A.compute_weekly(season, week)
         week_stats = S.week_report_stats(season, week)
         rivalry_matchups = H.rivalry_matchups_for_week(season, league_id, week)
@@ -96,7 +100,9 @@ def generate_one(league_id, month_arg=None, week_arg=None, do_season=False,
             season, awards, roasts, period_label=label, week=week,
             rivalry_matchups=rivalry_matchups, recap=recap,
             decision_lines=dec_lines, decision_awards=dec_awards) if do_pdf else None
-        return season, html_out, pdf_out, label
+        email_html = RND.render_email_html(season, awards, roasts, label,
+                                           pdf_attached=bool(pdf_out))
+        return season, html_out, pdf_out, label, email_html
 
     if do_season:
         ctx, awards = A.compute_season(season)
@@ -119,11 +125,13 @@ def generate_one(league_id, month_arg=None, week_arg=None, do_season=False,
         pdf_out = PRND.render_pdf_html(
             season, awards, roasts, period_label=label,
             season_stats=ss, kind="season", recap=recap, waiver_take=waiver_take) if do_pdf else None
-        return season, html_out, pdf_out, label
+        email_html = RND.render_email_html(season, awards, roasts, label,
+                                           pdf_attached=bool(pdf_out))
+        return season, html_out, pdf_out, label, email_html
 
     season_year = int(season.season) if season.season.isdigit() else None
     if season_year is None:
-        return season, None, None, None
+        return season, None, None, None, None
     buckets = CM.group_weeks_by_month(season_year, sorted(season.weeks.keys()))
     if month_arg:
         y, m = month_arg.split("-")
@@ -132,7 +140,7 @@ def generate_one(league_id, month_arg=None, week_arg=None, do_season=False,
     else:
         key, weeks = CM.current_month_weeks(season_year, sorted(season.weeks.keys()))
     if not weeks:
-        return season, None, None, None
+        return season, None, None, None, None
 
     ms = M.month_stats(season, weeks)
     prev_weeks = CM.previous_month_weeks(buckets, key)
@@ -159,7 +167,9 @@ def generate_one(league_id, month_arg=None, week_arg=None, do_season=False,
         season, awards, roasts, period_label=label,
         season_stats=ss, kind="monthly", month_stats=ms,
         recap=recap, waiver_take=waiver_take) if do_pdf else None
-    return season, html_out, pdf_out, label
+    email_html = RND.render_email_html(season, awards, roasts, label,
+                                       pdf_attached=bool(pdf_out))
+    return season, html_out, pdf_out, label, email_html
 
 
 def _send_mail(to_addr, subject, text_body, html_body=None, attachment_path=None):
@@ -196,6 +206,22 @@ def _send_mail(to_addr, subject, text_body, html_body=None, attachment_path=None
 UPGRADE_URL = "https://waiver-wire-tap.com/"
 
 
+def _banner_html(inner: str, bg: str, border: str, color: str) -> str:
+    """Wrap a notice in the same 600px centred column the email body uses, so
+    a spliced-in banner lines up with the card instead of spanning the full
+    window width."""
+    return (
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+        f'style="background:#eef1f6;"><tr><td align="center" style="padding:20px 12px 0;">'
+        f'<table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" '
+        f'style="width:100%;max-width:600px;"><tr><td '
+        f'style="background:{bg};border:1px solid {border};border-radius:8px;'
+        f'padding:12px 16px;font:14px/1.45 -apple-system,BlinkMacSystemFont,\'Segoe UI\','
+        f'Helvetica,Arial,sans-serif;color:{color};">{inner}</td></tr></table>'
+        f'</td></tr></table>'
+    )
+
+
 def _trial_banner(league_name: str, days_remaining: int) -> tuple[str, str]:
     """Returns (html_snippet, text_line) reminding a trial league how long
     they have left at full tier — shown on every dossier email while on
@@ -209,25 +235,37 @@ def _trial_banner(league_name: str, days_remaining: int) -> tuple[str, str]:
         msg = (f'You\'re on the free trial for "{league_name}" — {days_remaining} day(s) left '
                f"before you move to the free tier.")
     keep_it_text = f"Keep full access at {UPGRADE_URL}"
-    html = (f'<div style="background:#fff8e1;border:1px solid #f0c36d;border-radius:6px;'
-           f'padding:10px 14px;margin:0 0 16px;font:14px/1.4 -apple-system,sans-serif;'
-           f'color:#6b5300;">{msg} '
-           f'<a href="{UPGRADE_URL}" style="color:#6b5300;font-weight:600;">Keep full access &rarr;</a></div>')
+    inner = (f'{msg} <a href="{UPGRADE_URL}" style="color:#6b5300;font-weight:600;">'
+             f'Keep full access &rarr;</a>')
+    html = _banner_html(inner, "#fff8e1", "#f0c36d", "#6b5300")
     return html, f"{msg} {keep_it_text}"
 
 
+def _splice_after_body(html_doc: str, snippet: str) -> str:
+    """Insert snippet immediately after the opening <body> tag, whatever
+    attributes it carries. A plain str.replace("<body>") silently no-ops on
+    <body style="..."> — which is exactly what the email template uses — and
+    a dropped trial banner is the kind of thing nobody notices for weeks."""
+    m = re.search(r"<body\b[^>]*>", html_doc, re.I)
+    if not m:
+        return snippet + html_doc
+    return html_doc[:m.end()] + snippet + html_doc[m.end():]
+
+
 def send_email(to_addr, subject, html_body, *, attachment_path=None, trial_note=None):
-    """Sends the dossier itself, as an inline HTML email.
+    """Sends the slim HTML teaser inline, with the full dossier attached as PDF.
 
     trial_note, when given, is (html_snippet, text_line) from _trial_banner():
-    the html_snippet is spliced right after <body> in the emailed HTML (the
-    HTML/PDF saved to disk are left untouched), and the text_line is appended
+    the html_snippet is spliced right after the <body> tag of the emailed HTML
+    (the HTML/PDF saved to disk are left untouched), and the text_line is appended
     to the plain-text alternative.
     """
-    text_body = "Your dossier is attached as HTML. Open it in a browser."
+    text_body = ("Your full dossier is attached as a PDF.\n"
+                 "Open it for standings, the luck index, the Decision Lab, "
+                 "waivers and trades.")
     if trial_note:
         banner_html, banner_text = trial_note
-        html_body = html_body.replace("<body>", f"<body>{banner_html}", 1)
+        html_body = _splice_after_body(html_body, banner_html)
         text_body = f"{text_body}\n\n{banner_text}"
     return _send_mail(to_addr, subject, text_body, html_body, attachment_path=attachment_path)
 
@@ -258,18 +296,16 @@ def send_welcome_email(to_addr, league_name, html_report, *, attachment_path=Non
     text_body = (
         f'Welcome to Sleeper Dossier! "{league_name}" has just been added to the full '
         f"premium tier for a {weeks}-week free trial — standings, charts, the luck "
-        f"leaderboard, waiver/trade breakdown, and roasts, all included. Here's last "
-        f"week's report to kick things off.\n\n"
+        f"leaderboard, waiver/trade breakdown, and roasts, all included. Last week's "
+        f"full report is attached to kick things off.\n\n"
         f"Keep full access after the trial at {UPGRADE_URL}"
     )
-    banner_html = (
-        f'<div style="background:#eaf6ea;border:1px solid #8fc98f;border-radius:6px;'
-        f'padding:10px 14px;margin:0 0 16px;font:14px/1.4 -apple-system,sans-serif;'
-        f'color:#245c24;">Welcome! "{league_name}" has been added to the full premium tier '
-        f'for a {weeks}-week free trial — enjoy the full report below. '
-        f'<a href="{UPGRADE_URL}" style="color:#245c24;font-weight:600;">Keep full access &rarr;</a></div>'
-    )
-    html_body = html_report.replace("<body>", f"<body>{banner_html}", 1)
+    banner_html = _banner_html(
+        f'Welcome! "{html_mod.escape(league_name)}" has been added to the full premium tier '
+        f'for a {weeks}-week free trial — your first full report is attached. '
+        f'<a href="{UPGRADE_URL}" style="color:#245c24;font-weight:600;">Keep full access &rarr;</a>',
+        "#eaf6ea", "#8fc98f", "#245c24")
+    html_body = _splice_after_body(html_report, banner_html)
     return _send_mail(to_addr, subject, text_body, html_body, attachment_path=attachment_path)
 
 
@@ -371,7 +407,7 @@ def _run_welcome(args, leagues):
         from . import pdf as PDF
     os.makedirs(args.outdir, exist_ok=True)
 
-    ok, failed, invalid, bad_email = 0, 0, 0, 0
+    ok, failed, invalid, bad_email, nothing_yet = 0, 0, 0, 0, 0
     for row in leagues:
         if not T.is_new_signup(row["signup_date"]):
             continue
@@ -388,11 +424,11 @@ def _run_welcome(args, leagues):
             continue
         tier = T.effective_tier(row["tier"], row["signup_date"])
         try:
-            season, html_out, pdf_out, period = generate_one(
+            season, html_out, pdf_out, period, email_html = generate_one(
                 lid, week_arg="latest", do_roast=not args.no_roast, do_pdf=args.pdf, tier=tier)
             if not html_out:
-                print(f"  ! {label}: no data for period — skipping welcome", file=sys.stderr)
-                failed += 1
+                print(f"  - {label}: no played weeks yet — nothing to welcome with", file=sys.stderr)
+                nothing_yet += 1
                 continue
         except Exception as e:
             print(f"  x {label}: {e}", file=sys.stderr)
@@ -409,14 +445,15 @@ def _run_welcome(args, leagues):
                 pdf_path = None
 
         try:
-            send_welcome_email(row["email"], season.name, html_out, attachment_path=pdf_path)
+            send_welcome_email(row["email"], season.name, email_html, attachment_path=pdf_path)
             print(f"  ok {label}: welcomed {row['email']} ({period})")
             ok += 1
         except Exception as e:
             print(f"     welcome email failed for {row['email']}: {e}", file=sys.stderr)
             bad_email += 1
 
-    print(f"\nWelcome run done: {ok} welcomed, {failed} failed, {invalid} invalid league ID(s), "
+    print(f"\nWelcome run done: {ok} welcomed, {nothing_yet} with no played weeks yet, "
+          f"{failed} failed, {invalid} invalid league ID(s), "
           f"{bad_email} email(s) skipped/failed.", file=sys.stderr)
     return 0 if failed == 0 and invalid == 0 and bad_email == 0 else 2
 
@@ -456,7 +493,7 @@ def main(argv=None):
     if args.pdf:
         from . import pdf as PDF
 
-    ok, failed, invalid, bad_email = 0, 0, 0, 0
+    ok, failed, invalid, bad_email, nothing_yet = 0, 0, 0, 0, 0
     for row in leagues:
         lid = row["league_id"]
         label = row["label"] or lid
@@ -467,12 +504,12 @@ def main(argv=None):
         tier = T.effective_tier(row["tier"], row["signup_date"])
         pdf_path = None
         try:
-            season, html_out, pdf_out, period = generate_one(
+            season, html_out, pdf_out, period, email_html = generate_one(
                 lid, month_arg=args.month, week_arg=args.week, do_season=args.season,
                 do_roast=not args.no_roast, do_pdf=args.pdf, tier=tier)
             if not html_out:
-                print(f"  ! {label}: no data for period", file=sys.stderr)
-                failed += 1
+                print(f"  - {label}: no played weeks yet — nothing to report", file=sys.stderr)
+                nothing_yet += 1
                 continue
             path = os.path.join(args.outdir, _dossier_filename(season.name, "html"))
             with open(path, "w", encoding="utf-8") as fh:
@@ -504,7 +541,7 @@ def main(argv=None):
                 try:
                     days_left = T.trial_days_remaining(row["tier"], row["signup_date"])
                     trial_note = _trial_banner(season.name, days_left) if days_left is not None else None
-                    send_email(row["email"], f"{season.name} - {period}", html_out,
+                    send_email(row["email"], f"{season.name} - {period}", email_html,
                               attachment_path=pdf_path, trial_note=trial_note)
                     print(f"     emailed {row['email']}" + (" (+pdf)" if pdf_path else "")
                           + (" (+trial reminder)" if trial_note else ""))
@@ -515,7 +552,8 @@ def main(argv=None):
                     print(f"     email failed for {row['email']}: {e}", file=sys.stderr)
                     bad_email += 1
 
-    print(f"\nDone: {ok} generated, {failed} failed, {invalid} invalid league ID(s), "
+    print(f"\nDone: {ok} generated, {nothing_yet} with no played weeks yet, "
+          f"{failed} failed, {invalid} invalid league ID(s), "
           f"{bad_email} email(s) skipped/failed.", file=sys.stderr)
     return 0 if failed == 0 and invalid == 0 and bad_email == 0 else 2
 

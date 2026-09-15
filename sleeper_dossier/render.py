@@ -1335,3 +1335,147 @@ def render_weekly_html(season, awards, roasts, period_label, week, rivalry_match
   {charts_html}
   {rivalry_html}
 </div></body></html>"""
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Slim HTML email
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# The full dossier is 900KB once every avatar is inlined as a base64 data URI,
+# which is ~9x Gmail's ~102KB clipping threshold — most of it ends up hidden
+# behind "View entire message". It also leans on <canvas> + Chart.js and on
+# flex/grid, none of which survive an email client.
+#
+# So the email is deliberately NOT the dossier: it's a teaser — a couple of
+# standout awards and the branding — with the real thing attached as a PDF.
+# Everything here is table-based with inline styles, and avatars are plain
+# sleepercdn.com URLs rather than data URIs, which is what keeps it small.
+
+EMAIL_BRAND = "The Waiver Wire Tap"
+_EMAIL_NAVY = "#15243b"
+_EMAIL_GREEN = "#19c37d"
+_EMAIL_RED = "#c0392b"
+_EMAIL_MUTED = "#5b6b85"
+
+
+def _email_award_image(season, a) -> str:
+    """Remote CDN URL for an award's subject — never a data URI. Returns ""
+    when there's no natural subject, so the caller can omit the cell."""
+    if a.image_kind == "player" and a.player_id:
+        return IMG.player_headshot_url(a.player_id)
+    if a.winner_rid is not None:
+        return IMG.manager_avatar_url(season.teams.get(a.winner_rid))
+    return ""
+
+
+def _email_hero(season, a, roasts, label: str) -> str:
+    """One standout award, as an email-safe table."""
+    accent = _EMAIL_GREEN if a.hall == "fame" else _EMAIL_RED
+    team = html.escape(season.team_name(a.winner_rid))
+    img = _email_award_image(season, a)
+    img_cell = ""
+    if img:
+        img_cell = (
+            f'<td width="56" valign="top" style="padding:0 14px 0 0;">'
+            f'<img src="{html.escape(img, quote=True)}" width="48" height="48" alt="" '
+            f'style="display:block;width:48px;height:48px;border-radius:50%;'
+            f'border:2px solid {accent};background:#cdd5e3;"></td>'
+        )
+    roast = roasts.get(a.title, "")
+    roast_html = ""
+    if roast:
+        roast_html = (
+            f'<div style="margin:8px 0 0;padding:8px 12px;background:#f7f9fc;'
+            f'border-left:3px solid {accent};font-size:13px;line-height:1.5;'
+            f'color:{_EMAIL_NAVY};">{html.escape(roast)}</div>'
+        )
+    return f"""
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="margin:0 0 14px;border:1px solid #e3e8f0;border-radius:8px;
+                    border-collapse:separate;background:#ffffff;">
+        <tr><td style="padding:14px 16px;">
+          <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+                      color:{accent};font-weight:700;margin:0 0 10px;">{html.escape(label)}</div>
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+            <tr>{img_cell}<td valign="top">
+              <div style="font-size:17px;font-weight:700;color:{_EMAIL_NAVY};
+                          line-height:1.25;">{team}</div>
+              <div style="font-size:13px;color:{_EMAIL_MUTED};margin:3px 0 0;
+                          line-height:1.45;">{html.escape(a.flavour)} — {html.escape(a.headline)}</div>
+            </td></tr>
+          </table>
+          {roast_html}
+        </td></tr>
+      </table>"""
+
+
+def _pick_email_awards(awards: list) -> list:
+    """The one or two awards worth putting in front of someone before they
+    open the PDF: the week's standout manager, plus a contrasting lowlight.
+    Falls back to whatever's available so a league missing either still gets
+    a sensible email."""
+    by_title = {a.title: a for a in awards if a.winner_rid is not None}
+    picked = []
+    top = by_title.get("Top of the Pile") or next(
+        (a for a in awards if a.hall == "fame" and a.winner_rid is not None), None)
+    if top:
+        picked.append((top, "Manager of the Week"))
+    bottom = by_title.get("Bottom Feeders") or next(
+        (a for a in awards if a.hall == "shame" and a.winner_rid is not None), None)
+    if bottom and bottom is not top:
+        picked.append((bottom, bottom.title))
+    return picked
+
+
+def render_email_html(season, awards, roasts, period_label: str,
+                      *, pdf_attached: bool = True) -> str:
+    """Compact, email-client-safe teaser. The full report rides along as the
+    PDF attachment — this is what someone reads in the preview pane."""
+    league = html.escape(season.name)
+    period = html.escape(period_label)
+    heroes = "".join(_email_hero(season, a, roasts, label)
+                     for a, label in _pick_email_awards(awards))
+    if pdf_attached:
+        cta = (f'<p style="margin:0 0 6px;font-size:15px;color:{_EMAIL_NAVY};font-weight:600;">'
+              f'Your full {period} is attached as a PDF.</p>'
+              f'<p style="margin:0;font-size:13px;color:{_EMAIL_MUTED};line-height:1.5;">'
+              f'Standings, luck index, the Decision Lab, waivers and trades — the lot.</p>')
+    else:
+        cta = (f'<p style="margin:0;font-size:13px;color:{_EMAIL_MUTED};line-height:1.5;">'
+              f'The full breakdown is on its way.</p>')
+    return f"""<html><body style="margin:0;padding:0;background:#eef1f6;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+         style="background:#eef1f6;padding:20px 12px;">
+    <tr><td align="center">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0"
+             style="width:100%;max-width:600px;background:#ffffff;border-radius:12px;
+                    overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',
+                    Helvetica,Arial,sans-serif;">
+        <tr><td style="background:{_EMAIL_NAVY};padding:22px 24px;">
+          <div style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+                      color:{_EMAIL_GREEN};font-weight:700;">{html.escape(EMAIL_BRAND)}</div>
+          <div style="font-size:24px;font-weight:800;color:#ffffff;margin:6px 0 0;
+                      line-height:1.15;">{period}</div>
+          <div style="font-size:13px;color:#a9b6cc;margin:4px 0 0;">{league}</div>
+        </td></tr>
+        <tr><td style="padding:22px 24px 6px;">
+          <p style="margin:0 0 16px;font-size:15px;line-height:1.5;color:{_EMAIL_NAVY};">
+            Here's your weekly waiver wire report — the headlines first.</p>
+          {heroes}
+        </td></tr>
+        <tr><td style="padding:6px 24px 24px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+                 style="background:#f7f9fc;border-radius:8px;border-collapse:separate;">
+            <tr><td style="padding:16px 18px;">{cta}</td></tr>
+          </table>
+        </td></tr>
+        <tr><td style="padding:0 24px 24px;">
+          <div style="border-top:1px solid #e3e8f0;padding-top:14px;font-size:12px;
+                      color:{_EMAIL_MUTED};line-height:1.5;">
+            {html.escape(EMAIL_BRAND)} · {league}<br>
+            Delivered every week of the season.</div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>"""
