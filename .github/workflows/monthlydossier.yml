@@ -1,0 +1,95 @@
+name: Monthly dossier
+
+on:
+  schedule:
+    # 4th of the month, 17:00 UTC. The monthly report covers the latest
+    # *completed* calendar month, and calendar_map assigns each NFL week to
+    # the month its Sunday falls in — so a week whose Sunday was the 30th
+    # isn't finished until its Monday night game on the 1st. Waiting until
+    # the 4th clears that with room to spare.
+    #
+    # Only in months that can follow a month of football: October through
+    # January report on Sept–Dec, and February reports on January. Running
+    # in June would just print "no completed month found".
+    - cron: "0 17 4 1,2,10,11,12 *"
+  workflow_dispatch:
+    inputs:
+      worksheet:
+        description: "Sheet tab to read (leave blank for the scheduled default: production)"
+        required: false
+        default: "Test"
+      month:
+        description: "Month as YYYY-MM (leave blank for the latest completed month)"
+        required: false
+        default: ""
+      send_email:
+        description: "Actually email the dossiers. Off by default for manual runs — the artifact below is usually what you want."
+        required: false
+        type: boolean
+        default: false
+      show_appendix:
+        description: "Force the new-analytics appendix on, even before it has enough data to mean anything"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright Chromium (for --pdf)
+        run: playwright install --with-deps chromium
+
+      - name: Write service account key
+        run: echo "$GOOGLE_SHEETS_CREDENTIALS_JSON" > /tmp/gsheets-key.json
+        env:
+          GOOGLE_SHEETS_CREDENTIALS_JSON: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS_JSON }}
+
+      - name: Generate monthly dossiers
+        env:
+          GOOGLE_SHEETS_CREDENTIALS: /tmp/gsheets-key.json
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          # On for a manual run, since previewing the new sections is the
+          # reason to dispatch one by hand; empty for the schedule, so the
+          # mail that goes to subscribers keeps its own data gating.
+          SLEEPER_SHOW_APPENDIX: ${{ (github.event_name == 'workflow_dispatch' && inputs.show_appendix) && '1' || '' }}
+          # The schedule always mails. A manual run only mails if asked —
+          # dispatching one to look at the output shouldn't send real email
+          # to everyone on the sheet.
+          EMAIL_FLAG: ${{ (github.event_name == 'schedule' || inputs.send_email) && '--email' || '' }}
+          # Blank means "latest completed month", which is what the schedule
+          # wants; a manual run can name one to re-render an earlier month.
+          MONTH_ARG: ${{ inputs.month && format('--month {0}', inputs.month) || '' }}
+        run: |
+          python -m sleeper_dossier.batch \
+            --sheet "${{ secrets.SHEET_ID }}" \
+            --worksheet "${{ github.event.inputs.worksheet || 'production' }}" \
+            $MONTH_ARG \
+            $EMAIL_FLAG \
+            --pdf \
+            --outdir reports
+
+      # The point of a manual run is usually to read the thing, so publish it
+      # rather than making the reader dig it out of an inbox.
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: monthly-dossier${{ inputs.month && format('-{0}', inputs.month) || '' }}
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 30
