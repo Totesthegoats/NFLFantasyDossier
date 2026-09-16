@@ -59,6 +59,12 @@ class PlayerLine:
     expected_pts: float
     started: bool
     snap_eligible: bool = True
+    # Receiving context — None when unknown (non-receiver, no NGS match, or
+    # the source 404'd). Never 0.0 as a stand-in: a real 0% air-yards share
+    # and "we couldn't find out" mean opposite things to a regression call.
+    adot: float | None = None
+    air_yards_share: float | None = None
+    yac_oe: float | None = None
 
 
 @dataclass
@@ -228,6 +234,86 @@ def _load_season_weekly(season_year: int):
             print(f"  [decision] import_weekly_data({year}) failed: {exc}")
     _weekly_cache[season_year] = None
     return None
+
+
+_ngs_cache: dict = {}
+
+
+def _load_ngs_receiving(season_year: int):
+    """NGS weekly receiving for `season_year`, falling back to the prior season
+    the same way _load_season_weekly does.
+
+    NGS is a separate nflverse artifact from import_weekly_data, so it 404s on
+    its own schedule — the season that's missing here is not necessarily the
+    one missing there, and each has to fall back independently.
+    """
+    if not _HAS_NFL:
+        return None
+    if season_year in _ngs_cache:
+        return _ngs_cache[season_year]
+    for year in (season_year, season_year - 1):
+        try:
+            df = _nfl.import_ngs_data("receiving", years=[year])
+            if df is None or (hasattr(df, "empty") and df.empty):
+                continue
+            if "season_type" in df.columns:
+                df = df[df["season_type"] == "REG"].copy()
+            if year != season_year:
+                print(f"  [decision ngs] {season_year} unavailable; using {year} receiving data")
+            _ngs_cache[season_year] = df
+            return df
+        except Exception as exc:
+            print(f"  [decision ngs] import_ngs_data({year}) failed: {exc}")
+    _ngs_cache[season_year] = None
+    return None
+
+
+def _receiving_context(season_year: int, week: int) -> dict[str, dict]:
+    """gsis_id -> {adot, air_yards_share, yac_oe} for one week.
+
+    aDOT is NGS's avg_intended_air_yards (depth of every target, caught or
+    not — the version that measures role rather than outcome). Share is
+    percent_share_of_intended_air_yards, normalised to a 0-1 fraction.
+
+    For YAC we deliberately take avg_yac_above_expectation over raw avg_yac:
+    raw YAC mostly reports what scheme and coverage handed the player, and is
+    the noisy, poorly-repeating part. YAC over expectation is what they did
+    beyond what that same catch normally yields, which is the part that's
+    actually the player and the part worth citing in a regression call.
+    """
+    df = _load_ngs_receiving(season_year)
+    if df is None or (hasattr(df, "empty") and df.empty):
+        return {}
+    if "week" not in df.columns:
+        return {}
+    wk = df[df["week"] == week]
+    if wk.empty:
+        return {}
+
+    def _num(row, col):
+        if col not in wk.columns:
+            return None
+        v = row.get(col)
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return None if f != f else f     # drop NaN
+
+    out: dict[str, dict] = {}
+    for _, row in wk.iterrows():
+        gsis = row.get("player_gsis_id")
+        if not gsis:
+            continue
+        share = _num(row, "percent_share_of_intended_air_yards")
+        out[str(gsis)] = {
+            "adot": _num(row, "avg_intended_air_yards"),
+            # NGS reports this as a percentage (0-100); store a fraction so it
+            # matches air_yards_share elsewhere in nflverse.
+            "air_yards_share": (share / 100.0) if share is not None else None,
+            "yac_oe": _num(row, "avg_yac_above_expectation"),
+        }
+    return out
 
 
 def _load_sleeper_week_projections(season_year: int, week: int) -> dict[str, float]:
@@ -406,6 +492,7 @@ def enrich_lineups(season, week: int) -> tuple[list[PlayerLine], float, float, l
     if not sleeper_proj_map and not sleeper_week_proj:
         sleeper_week_proj = _load_sleeper_week_projections(season_year, week)
     snap_eligible_set = _load_snap_filter(season_year, week)
+    rec_ctx = _receiving_context(season_year, week)
 
     wd = season.weeks.get(week, {})
     if not wd:
@@ -457,11 +544,15 @@ def enrich_lineups(season, week: int) -> tuple[list[PlayerLine], float, float, l
             if exp is None:
                 exp = 0.0
 
+            rc = rec_ctx.get(gsis, {}) if (gsis and not is_dst) else {}
             lines.append(PlayerLine(
                 roster_id=rid, manager=manager, player_id=pid,
                 player_name=pname, position=pos, nfl_id=gsis,
                 actual_pts=actual, projected_pts=proj, expected_pts=exp,
                 started=started, snap_eligible=snap_elig,
+                adot=rc.get("adot"),
+                air_yards_share=rc.get("air_yards_share"),
+                yac_oe=rc.get("yac_oe"),
             ))
 
     skill_rate = round(skill_joined / skill_total, 3) if skill_total else 0.0
@@ -471,6 +562,8 @@ def enrich_lineups(season, week: int) -> tuple[list[PlayerLine], float, float, l
     exp_miss = sum(1 for p in skill_lines if p.expected_pts == 0.0)
     source = "opportunity model" if same_year else "Sleeper pre-game projection"
     print(f"  [decision] expected_pts ({source}): {exp_hits} hits, {exp_miss} misses")
+    rec_hits = sum(1 for p in skill_lines if p.air_yards_share is not None)
+    print(f"  [decision ngs] receiving context: {rec_hits}/{len(skill_lines)} skill players matched")
     return lines, skill_rate, dst_rate, unmatched
 
 
@@ -691,6 +784,45 @@ def _award_coin_flip_curse(by_manager: dict) -> DecisionAward | None:
 # Award 5: Regression Watch (Smoke & Mirrors + The Grinder)
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _receiving_evidence(p: "PlayerLine", kind: str) -> str:
+    """A short corroborating clause for a regression call, or "" when we have
+    no receiving data for this player.
+
+    The points gap alone says a player beat or missed their expected total;
+    it can't say whether the underlying role supports it. Air-yards share is
+    the tell. A sell-high on a receiver who owns a third of his team's air
+    yards is a much weaker call than one on one who owns almost none — and a
+    buy-low on a heavily-targeted receiver is a much stronger one. Where the
+    usage contradicts the gap, say so rather than quietly overstating.
+    """
+    if p.air_yards_share is None and p.adot is None:
+        return ""
+
+    bits = []
+    if p.air_yards_share is not None:
+        bits.append(f"{p.air_yards_share * 100:.0f}% of team air yards")
+    if p.adot is not None:
+        bits.append(f"{p.adot:.1f} yd aDOT")
+    if p.yac_oe is not None and abs(p.yac_oe) >= 0.5:
+        bits.append(f"{p.yac_oe:+.1f} YAC over expected")
+    if not bits:
+        return ""
+    usage = ", ".join(bits)
+
+    share = p.air_yards_share
+    if kind == "sell":
+        if share is not None and share < 0.15:
+            return f" Usage doesn't back it: {usage}."
+        if share is not None and share >= 0.30:
+            return f" Though the role is real ({usage}), so this may hold up."
+        return f" Usage: {usage}."
+    if share is not None and share >= 0.25:
+        return f" The opportunity is there: {usage}."
+    if share is not None and share < 0.10:
+        return f" But the role is thin: {usage} — this may not be a bounce-back."
+    return f" Usage: {usage}."
+
+
 def _award_regression_watch(
     lines: list[PlayerLine],
     exclude_pids: set[str] | None = None,
@@ -750,7 +882,8 @@ def _award_regression_watch(
             winner_rid=sell_high.roster_id,
             headline=(f"{sell_high.player_name}: {sell_high.actual_pts:.1f} pts "
                       f"(expected {sell_high.expected_pts:.1f})"),
-            detail=f"+{sh_delta:.1f} above expected — expect regression",
+            detail=(f"+{sh_delta:.1f} above expected — expect regression."
+                    + _receiving_evidence(sell_high, "sell")),
             severity=min(100.0, 40.0 + sh_delta * 2),
             image_kind="player",
             player_id=sell_high.player_id,
@@ -759,6 +892,8 @@ def _award_regression_watch(
                 "player_id": sell_high.player_id, "actual": sell_high.actual_pts,
                 "expected": sell_high.expected_pts, "delta": sh_delta,
                 "position": sell_high.position, "manager": sell_high.manager,
+                "adot": sell_high.adot, "air_yards_share": sell_high.air_yards_share,
+                "yac_oe": sell_high.yac_oe,
             },
         )
 
@@ -772,7 +907,8 @@ def _award_regression_watch(
             winner_rid=buy_low.roster_id,
             headline=(f"{buy_low.player_name}: {buy_low.actual_pts:.1f} pts "
                       f"(expected {buy_low.expected_pts:.1f})"),
-            detail=f"{bl_delta:.1f} below expected — due positive regression",
+            detail=(f"{bl_delta:.1f} below expected — due positive regression."
+                    + _receiving_evidence(buy_low, "buy")),
             severity=min(100.0, 40.0 + abs(bl_delta) * 2),
             image_kind="player",
             player_id=buy_low.player_id,
@@ -781,6 +917,8 @@ def _award_regression_watch(
                 "player_id": buy_low.player_id, "actual": buy_low.actual_pts,
                 "expected": buy_low.expected_pts, "delta": bl_delta,
                 "position": buy_low.position, "manager": buy_low.manager,
+                "adot": buy_low.adot, "air_yards_share": buy_low.air_yards_share,
+                "yac_oe": buy_low.yac_oe,
             },
         )
 
