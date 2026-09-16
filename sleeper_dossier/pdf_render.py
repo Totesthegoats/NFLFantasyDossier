@@ -766,6 +766,73 @@ def _wrap_page(inner: str, title: str | None, num: int | None,
     return f'<div class="page"><div class="page-inner">{header}{subhead}{inner}{footer}</div></div>'
 
 
+
+# Kept as a plain string (not an f-string like _PDF_CHARTS_JS) so the Chart.js
+# object literals below don't need every brace doubled.
+_PDF_APPENDIX_CHARTS_JS = """
+(function() {
+  const NAVY = '#15243b';
+  const PALETTE = ['#15243b','#19c37d','#c0392b','#2e86c1','#e67e22','#8e44ad',
+                   '#16a085','#d4ac0d','#5d6d7e','#cb4335','#1abc9c','#7d3c98'];
+
+  (DOSSIER_DATA.lineCharts || []).forEach(function(cfg) {
+    new Chart(document.getElementById(cfg.id), {
+      type: 'line',
+      data: { labels: cfg.labels, datasets: cfg.series.map(function(s, i) {
+        return { label: s.label, data: s.data, borderColor: PALETTE[i % PALETTE.length],
+                 borderWidth: s.emphasis ? 3 : 1.2, pointRadius: 0, tension: 0.25, fill: false };
+      })},
+      options: { responsive: false, animation: false,
+        plugins: { legend: { display: true, position: 'bottom', labels: { boxWidth: 8, font: { size: 8 } } },
+                   datalabels: { display: false } },
+        scales: { x: { title: { display: true, text: cfg.xLabel } },
+                  y: { title: { display: true, text: cfg.yLabel } } } }
+    });
+  });
+
+  (DOSSIER_DATA.matrixCharts || []).forEach(function(cfg) {
+    const vals = cfg.cells.map(c => c.v);
+    const lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+    const span = (hi - lo) || 1;
+    new Chart(document.getElementById(cfg.id), {
+      type: 'matrix',
+      data: { datasets: [{ data: cfg.cells,
+        backgroundColor: function(ctx) {
+          const c = ctx.dataset.data[ctx.dataIndex];
+          if (!c) return '#fff';
+          const t = (c.v - lo) / span;
+          if (c.x === c.y) return 'rgba(21,36,59,0.92)';
+          return 'rgba(' + Math.round(192 - 167 * t) + ',' + Math.round(57 + 138 * t) + ',' +
+                 Math.round(43 + 82 * t) + ',0.82)';
+        },
+        borderColor: '#fff', borderWidth: 1,
+        width: (ctx) => (ctx.chart.chartArea || {}).width / cfg.xLabels.length - 2,
+        height: (ctx) => (ctx.chart.chartArea || {}).height / cfg.yLabels.length - 2 }] },
+      options: { responsive: false, animation: false,
+        plugins: { legend: { display: false },
+                   datalabels: { display: true, color: '#fff', font: { size: 8, weight: 700 },
+                                 formatter: (v) => v.v } },
+        scales: { x: { type: 'category', labels: cfg.xLabels, offset: true,
+                       ticks: { font: { size: 7 }, maxRotation: 90, minRotation: 60 }, grid: { display: false } },
+                  y: { type: 'category', labels: cfg.yLabels, offset: true, reverse: true,
+                       ticks: { font: { size: 7 } }, grid: { display: false } } } }
+    });
+  });
+
+  (DOSSIER_DATA.radarCharts || []).forEach(function(cfg) {
+    new Chart(document.getElementById(cfg.id), {
+      type: 'radar',
+      data: { labels: cfg.axes, datasets: [{ data: cfg.values, borderColor: NAVY,
+              backgroundColor: 'rgba(21,36,59,0.18)', borderWidth: 2, pointRadius: 3 }] },
+      options: { responsive: false, animation: false,
+        plugins: { legend: { display: false }, datalabels: { display: false } },
+        scales: { r: { min: 0, max: 100, ticks: { display: false }, pointLabels: { font: { size: 8 } } } } }
+    });
+  });
+})();
+"""
+
+
 def _full_doc(pages: list, specs: list, trajectory_specs: list | None = None,
               bump_specs: list | None = None,
               decision_specs: list | None = None) -> str:
@@ -773,7 +840,11 @@ def _full_doc(pages: list, specs: list, trajectory_specs: list | None = None,
     scripts appended after all content so canvases exist when JS runs."""
     scatter = [s for s in specs if s["kind"] == "scatter"]
     bar = [s for s in specs if s["kind"] == "bar"]
+    line = [s for s in specs if s["kind"] == "line"]
+    matrix = [s for s in specs if s["kind"] == "matrix"]
+    radar = [s for s in specs if s["kind"] == "radar"]
     data = {"scatterCharts": scatter, "barCharts": bar,
+            "lineCharts": line, "matrixCharts": matrix, "radarCharts": radar,
             "trajectoryCharts": trajectory_specs or [],
             "bumpCharts": bump_specs or [],
             "decisionCharts": decision_specs or []}
@@ -782,9 +853,12 @@ def _full_doc(pages: list, specs: list, trajectory_specs: list | None = None,
     chart_block = ""
     if has_charts:
         chart_block = (
-            f'<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>'
-            f'<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2"></script>'
-            f'<script>const DOSSIER_DATA = {data_json}; {_PDF_CHARTS_JS}</script>'
+            '<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>'
+            '<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2"></script>'
+            + ('<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-matrix@2"></script>'
+               if matrix else "")
+            + f'<script>const DOSSIER_DATA = {data_json}; {_PDF_CHARTS_JS}'
+              f'{_PDF_APPENDIX_CHARTS_JS}</script>'
         )
     return (f'<!doctype html><html><head><meta charset="utf-8">'
             f'<style>{_PDF_CSS}</style></head><body>'
@@ -1755,8 +1829,14 @@ def _has_hist(ctx):
 # ── Monthly/Season: generic charts page ──────────────────────────────────
 
 def _render_charts(ctx: dict) -> str:
-    """Generic charts page for monthly/season (scatter left, bars right)."""
-    specs = ctx.get("chart_specs", [])
+    """Generic charts page for monthly/season (scatter left, bars right).
+
+    Excludes the appendix specs: they live in chart_specs so the shared
+    DOSSIER_DATA payload can reach them, but they are laid out by
+    _render_appendix on their own pages.
+    """
+    appendix_ids = {s["id"] for s in (ctx.get("appendix_specs") or [])}
+    specs = [s for s in ctx.get("chart_specs", []) if s["id"] not in appendix_ids]
     if not specs:
         return '<div style="color:#9aa7bd;padding:20px">No charts for this period.</div>'
     scatter_specs = [s for s in specs if s["kind"] == "scatter"]
@@ -1894,6 +1974,90 @@ def _render_season_analytics(ctx: dict) -> str:
 # Section registry
 # ──────────────────────────────────────────────────────────────────────────────
 
+
+# ──────────────────────────────────────────────────────────────────────────
+# Appendix: new analytics, quarantined while they're trialled
+# ──────────────────────────────────────────────────────────────────────────
+
+_APPENDIX_W = 1010
+_APPENDIX_H = 360
+
+
+def _has_appendix(ctx): return bool(ctx.get("appendix_specs") or ctx.get("appendix_tables"))
+
+
+def _render_appendix(ctx: dict) -> list:
+    """Appendix pages: the tables first, then each new chart on its own row.
+
+    Returns a list so _assemble paginates it — the appendix carries a wide
+    heatmap and a twelve-series line chart, and cramming those onto one page
+    with the tables produces something unreadable at print size.
+    """
+    note = ('<p class="chart-caption" style="margin-bottom:14px">These sections are new and '
+            'still being trialled. They sit outside the main report while we work out which '
+            'of them earn a permanent place in it.</p>')
+    pages = []
+    tables = ctx.get("appendix_tables") or ""
+    if tables:
+        pages.append(note + tables)
+    specs = ctx.get("appendix_specs") or []
+    for spec in specs:
+        pages.append(_chart_box(spec, _APPENDIX_W, _APPENDIX_H))
+    return pages or [note + '<div style="color:#9aa7bd;padding:20px">Nothing to show yet.</div>']
+
+
+def _appendix_tables_html(season, weeks: list, upto_week: int, playoff_odds=None) -> str:
+    """Deep-dive and playoff-odds tables for the PDF appendix.
+
+    Deliberately rebuilt here rather than reusing render.py's HTML: the PDF
+    has its own CSS vocabulary and page geometry, and importing the screen
+    markup produces tables that overflow the print column.
+    """
+    from . import stats as S
+    from . import manager as MG
+
+    out = []
+    py = S.pythagorean(season, upto_week=upto_week)
+    cons = S.consistency(season, upto_week=upto_week)
+    opt = S.optimal_record(season, upto_week=upto_week)
+    clutch = S.clutch_record(season, upto_week=upto_week)
+    if py:
+        rows = ""
+        for rid, p in sorted(py.items(), key=lambda kv: kv[1]["delta"], reverse=True):
+            c, o, cl = cons.get(rid, {}), opt.get(rid, {}), clutch.get(rid, {})
+            rows += (f"<tr><td>{_esc(season.team_name(rid))}</td>"
+                     f"<td class='num'>{p['expected_wins']:.1f}</td>"
+                     f"<td class='num'>{p['delta']:+.1f}</td>"
+                     f"<td class='num'>{o.get('wins', 0)}-{o.get('losses', 0)}</td>"
+                     f"<td class='num'>{c.get('cv', 0):.0f}%</td>"
+                     f"<td class='num'>{cl.get('wins', 0)}-{cl.get('losses', 0)}</td></tr>")
+        out.append("<h4>Deep Dive</h4><table class='mini'><tr><th>Team</th><th>Exp W</th>"
+                   "<th>vs Exp</th><th>Optimal</th><th>Swing</th><th>Close</th></tr>"
+                   f"{rows}</table>")
+
+    luck = MG.schedule_luck(season, upto_week=upto_week)
+    if luck:
+        rows = ""
+        for rid, v in sorted(luck.items(), key=lambda kv: kv[1]["delta"], reverse=True):
+            rows += (f"<tr><td>{_esc(season.team_name(rid))}</td>"
+                     f"<td class='num'>{v['actual']}</td>"
+                     f"<td class='num'>{v['average']:.1f}</td>"
+                     f"<td class='num'>{v['delta']:+.1f}</td>"
+                     f"<td class='num'>{v['worst']}-{v['best']}</td></tr>")
+        out.append("<h4>Schedule Luck</h4><table class='mini'><tr><th>Team</th><th>Actual W</th>"
+                   "<th>Avg across all schedules</th><th>Luck</th><th>Range</th></tr>"
+                   f"{rows}</table>")
+
+    if playoff_odds:
+        rows = "".join(f"<tr><td>{_esc(season.team_name(rid))}</td>"
+                       f"<td class='num'>{o * 100:.1f}%</td></tr>"
+                       for rid, o in sorted(playoff_odds.items(),
+                                            key=lambda kv: kv[1], reverse=True))
+        out.append("<h4>Playoff Odds (Monte Carlo)</h4>"
+                   f"<table class='mini'><tr><th>Team</th><th>Odds</th></tr>{rows}</table>")
+    return "".join(out)
+
+
 @dataclass
 class Section:
     id: str
@@ -1930,6 +2094,7 @@ WEEKLY_SECTIONS: list[Section] = [
     Section("transactions-trades", "Transactions HQ: Trades",      _render_trade_hq),
     Section("rivalry",            "Rivalry Watch",                  _render_rivalry_v2,     when=_has_rivalry),
     Section("rivalry-leaderboard", "Rivalry Watch: All-Time",      _render_rivalry_leaderboard),
+    Section("appendix",           "Appendix: New Analytics",      _render_appendix, when=_has_appendix),
 ]
 
 MONTHLY_SECTIONS: list[Section] = [
@@ -1939,6 +2104,7 @@ MONTHLY_SECTIONS: list[Section] = [
     Section("standings",   "Standings",              _render_standings_monthly),
     Section("charts",      "Charts",                 _render_charts,           when=_has_charts),
     Section("analytics",   "Season Analysis",        _render_season_analytics),
+    Section("appendix",    "Appendix: New Analytics", _render_appendix, when=_has_appendix),
 ]
 
 SEASON_SECTIONS: list[Section] = [
@@ -1948,6 +2114,7 @@ SEASON_SECTIONS: list[Section] = [
     Section("standings",   "Standings",              _render_standings_monthly),
     Section("charts",      "Charts",                 _render_charts,           when=_has_charts),
     Section("analytics",   "Season Analysis",        _render_season_analytics),
+    Section("appendix",    "Appendix: New Analytics", _render_appendix, when=_has_appendix),
 ]
 
 
@@ -1982,8 +2149,9 @@ def _assemble(sections: list[Section], ctx: dict) -> str:
 
 def render_pdf_weekly_html(season, awards, roasts, period_label, week,
                            rivalry_matchups=None, recap="",
-                           decision_lines=None, decision_awards=None) -> str:
-    from .render import _scatter_spec, _bar_spec
+                           decision_lines=None, decision_awards=None,
+                           playoff_odds=None) -> str:
+    from .render import _scatter_spec, _bar_spec, _weekly_appendix_chart_specs
     import statistics as _st
 
     week_stats = S.week_report_stats(season, week)
@@ -2288,22 +2456,38 @@ def render_pdf_weekly_html(season, awards, roasts, period_label, week,
         # Decision Lab
         "decision_awards":       dec_awards or [],
         "decision_chart_specs":  dec_chart_specs,
+        # Appendix
+        "appendix_specs":  _weekly_appendix_chart_specs(season, week),
+        "appendix_tables": _appendix_tables_html(season, list(range(1, week + 1)),
+                                                 week, playoff_odds),
     }
+    ctx["chart_specs"] = list(ctx["chart_specs"]) + list(ctx["appendix_specs"])
     return _assemble(WEEKLY_SECTIONS, ctx)
 
 
 def render_pdf_html(season, awards, roasts, period_label,
                     season_stats=None, kind="monthly", month_stats=None,
-                    recap="", waiver_take="") -> str:
+                    recap="", waiver_take="", playoff_odds=None) -> str:
+    from .render import _manager_chart_specs, _draft_chart_specs
+
     weeks = _relevant_weeks(season, month_stats)
     upto_week = max(weeks) if month_stats else None
     specs = _season_chart_specs(season, season_stats, month_stats, upto_week)
+    appendix_specs = _manager_chart_specs(season, weeks, upto_week)
+    if kind == "season":
+        appendix_specs += _draft_chart_specs(season)
     ctx = {
         "season": season, "awards": awards, "roasts": roasts,
         "period_label": period_label, "kind": kind,
         "season_stats": season_stats, "month_stats": month_stats,
         "weeks": weeks, "upto_week": upto_week,
-        "recap": recap, "chart_specs": specs,
+        "appendix_specs": appendix_specs,
+        "appendix_tables": (_appendix_tables_html(season, weeks, upto_week, playoff_odds)
+                            if upto_week else ""),
+        # chart_specs feeds DOSSIER_DATA for the whole document, so the
+        # appendix specs must be in it even though they render on their own
+        # pages via _render_appendix rather than through _render_charts.
+        "recap": recap, "chart_specs": specs + appendix_specs,
     }
     sections = SEASON_SECTIONS if kind == "season" else MONTHLY_SECTIONS
     return _assemble(sections, ctx)

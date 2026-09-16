@@ -637,6 +637,8 @@ ul{margin:4px 0 12px;padding-left:20px;font-size:14px;line-height:1.6;}
 .contents ol{margin:0;padding-left:20px;columns:2;font-size:13.5px;line-height:1.9;}
 .contents a{color:var(--navy);text-decoration:none;}
 .contents a:hover{text-decoration:underline;}
+.appendix-note{font-size:13px;color:#5b6a85;font-style:italic;margin:0 0 16px;max-width:70ch;}
+.appendix{border-top:1px dashed #c3ccdb;padding-top:4px;}
 @media print{
   .section-head{break-after:avoid;page-break-after:avoid;}
   .verdict{break-inside:avoid;page-break-inside:avoid;}
@@ -926,6 +928,12 @@ def _manager_chart_specs(season, weeks: list, upto_week=None) -> list:
 
     timing = MG.transaction_timing(season, weeks, max_week=last)
     if timing:
+        # Every point gets a name label, so plotting all of them (a month of
+        # streamer defenses lands in one pile at x=0) makes the chart
+        # unreadable. Keep the most extreme movers in both directions —
+        # they are the ones the chart is about.
+        timing = sorted(timing, key=lambda t: abs(t["after_ppg"] - t["before_ppg"]),
+                        reverse=True)[:12]
         pts = []
         for t in timing:
             swing = t["after_ppg"] - t["before_ppg"]
@@ -1023,6 +1031,37 @@ def _season_chart_specs(season, season_stats, month_stats, upto_week=None) -> li
     return specs
 
 
+def _weekly_appendix_chart_specs(season, week: int | None) -> list:
+    """Weekly appendix chart: cumulative decision value.
+
+    Kept out of _weekly_chart_specs so the established weekly charts and the
+    newer appendix ones can be rendered into separate blocks.
+    """
+    specs = []
+    if week is not None:
+        cdv = MG.cumulative_decision_value(season, upto_week=week)
+        if cdv:
+            weeks_axis = sorted({w for v in cdv.values() for (w, _d, _c) in v["series"]})
+            # Emphasise the two extremes so a twelve-line chart still has a
+            # readable story rather than being a ball of spaghetti.
+            ranked = sorted(cdv.items(), key=lambda kv: kv[1]["total"])
+            emphasised = {ranked[0][0], ranked[-1][0]} if len(ranked) > 1 else set()
+            series = []
+            for rid, v in sorted(cdv.items(), key=lambda kv: kv[1]["total"]):
+                by_week = {w: c for (w, _d, c) in v["series"]}
+                series.append({
+                    "label": season.team_name(rid),
+                    "data": [by_week.get(w) for w in weeks_axis],
+                    "emphasis": rid in emphasised,
+                })
+            specs.append(_line_spec("decisionValueChart",
+                                    "Cumulative Cost of Start/Sit Decisions",
+                                    [f"Wk {w}" for w in weeks_axis], series,
+                                    "Week", "Cumulative points left on bench",
+                                    tall=True, caption_key="decision_value_chart"))
+    return specs
+
+
 def _weekly_chart_specs(season, week_stats: dict, week: int | None = None) -> list:
     """Weekly charts: this-week luck scatter (all-play% vs points scored,
     colored by whether the score beat the week's median — a single week's
@@ -1069,31 +1108,25 @@ def _weekly_chart_specs(season, week_stats: dict, week: int | None = None) -> li
                                "Lineup efficiency %", x_range=(0, 100),
                                caption_key="efficiency_chart"))
 
-    if week is not None:
-        cdv = MG.cumulative_decision_value(season, upto_week=week)
-        if cdv:
-            weeks_axis = sorted({w for v in cdv.values() for (w, _d, _c) in v["series"]})
-            # Emphasise the two extremes so a twelve-line chart still has a
-            # readable story rather than being a ball of spaghetti.
-            ranked = sorted(cdv.items(), key=lambda kv: kv[1]["total"])
-            emphasised = {ranked[0][0], ranked[-1][0]} if len(ranked) > 1 else set()
-            series = []
-            for rid, v in sorted(cdv.items(), key=lambda kv: kv[1]["total"]):
-                by_week = {w: c for (w, _d, c) in v["series"]}
-                series.append({
-                    "label": season.team_name(rid),
-                    "data": [by_week.get(w) for w in weeks_axis],
-                    "emphasis": rid in emphasised,
-                })
-            specs.append(_line_spec("decisionValueChart",
-                                    "Cumulative Cost of Start/Sit Decisions",
-                                    [f"Wk {w}" for w in weeks_axis], series,
-                                    "Week", "Cumulative points left on bench",
-                                    tall=True, caption_key="decision_value_chart"))
     return specs
 
 
-def _charts_html(specs: list) -> str:
+
+
+def _charts_html(specs: list, heading: str = "Charts", var_name: str = "CHART_DATA_MAIN",
+                 include_libs: bool = True) -> str:
+    """Render a block of charts.
+
+    Callable more than once per page (main report + appendix), which is why
+    the data global is named per call and the CDN tags are optional — a
+    second block that re-declared `const DOSSIER_DATA` would throw and take
+    every chart on the page down with it.
+
+    `var_name` must never itself be "DOSSIER_DATA": the engine aliases it to
+    that name inside its own scope, so a matching outer name makes the alias
+    self-referential and dies in the temporal dead zone.
+    """
+    assert var_name != "DOSSIER_DATA", "var_name collides with the engine's internal alias"
     if not specs:
         return ""
     boxes = []
@@ -1111,19 +1144,22 @@ def _charts_html(specs: list) -> str:
         "lineCharts": by_kind["line"], "matrixCharts": by_kind["matrix"],
         "radarCharts": by_kind["radar"],
     }).replace("</", "<\\/")
+    libs = ""
+    if include_libs:
+        libs = ('<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>'
+                '<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2"></script>')
     # The matrix controller is a separate plugin; only pay for it when a
     # matrix chart is actually on the page.
-    matrix_js = ('<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-matrix@2"></script>'
-                 if by_kind["matrix"] else "")
+    if by_kind["matrix"]:
+        libs += '<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-matrix@2"></script>'
+    heading_html = f"<h2>{html.escape(heading)}</h2>" if heading else ""
     return f"""
-  <h2>Charts</h2>
+  {heading_html}
   <div class="charts-grid">{''.join(boxes)}</div>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2"></script>
-  {matrix_js}
+  {libs}
   <script>
-    const DOSSIER_DATA = {data_json};
-    {_GENERIC_CHARTS_JS}
+    const {var_name} = {data_json};
+    (function() {{ const DOSSIER_DATA = {var_name}; {_GENERIC_CHARTS_JS} }})();
   </script>
 """
 
@@ -1291,6 +1327,24 @@ def _ordinal(n) -> str:
     else:
         suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
     return f"{n}{suffix}"
+
+
+def _appendix_html(blocks: list) -> str:
+    """Wrap newly-added analytics in a clearly-labelled appendix.
+
+    These sections are being trialled rather than promoted into the report
+    proper, so they sit behind one heading at the end where a reader can
+    ignore them wholesale — and where removing them again is a one-line
+    change rather than an unpicking job.
+    """
+    body = "".join(b for b in blocks if b)
+    if not body.strip():
+        return ""
+    return (f'<h2 class="section-head page-start" id="sec-appendix">Appendix: New Analytics</h2>'
+            f'<p class="appendix-note">These sections are new and still being trialled. '
+            f'They sit outside the main report while we work out which of them earn a '
+            f'permanent place in it.</p>'
+            f'<section class="appendix">{body}</section>')
 
 
 def _contents_html(sections: list) -> str:
@@ -1668,8 +1722,8 @@ def render_html(season, awards, roasts, period_label, season_stats=None,
         ("sec-standings", "Where Everyone Stands"),
         ("sec-deep", "Under the Hood"),
         ("sec-market", "The Market"),
-        ("sec-outlook", "The Outlook"),
         ("sec-charts", "The Charts"),
+        ("sec-appendix", "Appendix: New Analytics"),
     ]) if kind == "monthly" else ""
 
     narrative_html = ""
@@ -1677,11 +1731,18 @@ def render_html(season, awards, roasts, period_label, season_stats=None,
         narrative_html = _month_narrative_html(season, month_stats or {},
                                                prev_month_stats, period_label)
 
-    chart_specs = _season_chart_specs(season, season_stats, month_stats, upto_week)
-    chart_specs += _manager_chart_specs(season, weeks, upto_week)
+    # Established charts stay in the body; everything added recently is
+    # quarantined in the appendix while it's being trialled.
+    charts_html = _charts_html(
+        _season_chart_specs(season, season_stats, month_stats, upto_week))
+
+    appendix_specs = _manager_chart_specs(season, weeks, upto_week)
     if kind == "season":
-        chart_specs += _draft_chart_specs(season)
-    charts_html = _charts_html(chart_specs)
+        appendix_specs += _draft_chart_specs(season)
+    appendix_charts_html = _charts_html(appendix_specs, heading="",
+                                        var_name="CHART_DATA_APPENDIX", include_libs=False)
+    appendix_html = _appendix_html(
+        [deep_dive_html, playoff_html, appendix_charts_html])
 
     month_html = ""
     if month_stats:
@@ -1736,17 +1797,15 @@ def render_html(season, awards, roasts, period_label, season_stats=None,
   <div class="screen-only">{power_rank_html}{luck_html}{median_html}</div>
 
   <h2 class="section-head page-start" id="sec-deep">Under the Hood</h2>
-  {deep_dive_html}
   {draft_value_html}
 
   <h2 class="section-head page-start" id="sec-market">The Market</h2>
   {waiver_html}
 
-  <h2 class="section-head page-start" id="sec-outlook">The Outlook</h2>
-  {playoff_html}
-
   <h2 class="section-head page-start" id="sec-charts">The Charts</h2>
   {charts_html}
+
+  {appendix_html}
 </div></body></html>"""
 
 
@@ -1804,6 +1863,12 @@ def render_weekly_html(season, awards, roasts, period_label, week, rivalry_match
                                f"{swing_note}")
 
     weekly_deep_dive_html = _deep_dive_html(season, list(range(1, week + 1)), week)
+
+    weekly_appendix_charts = _charts_html(
+        _weekly_appendix_chart_specs(season, week), heading="",
+        var_name="CHART_DATA_APPENDIX", include_libs=False)
+    weekly_appendix_html = _appendix_html(
+        [weekly_deep_dive_html, weekly_playoff_html, weekly_appendix_charts])
 
     no_matchup_html = "" if pairs else (
         '<div class="notice">No head-to-head matchups recorded for this week (likely outside '
@@ -1946,10 +2011,9 @@ def render_weekly_html(season, awards, roasts, period_label, week, rivalry_match
 
   {pdf_table}
   <div class="screen-only">{power_html}{luck_index_html}{median_html}</div>
-  {weekly_deep_dive_html}
-  {weekly_playoff_html}
   {charts_html}
   {rivalry_html}
+  {weekly_appendix_html}
 </div></body></html>"""
 
 

@@ -103,7 +103,8 @@ def generate_one(league_id, month_arg=None, week_arg=None, do_season=False,
         pdf_out = PRND.render_pdf_weekly_html(
             season, awards, roasts, period_label=label, week=week,
             rivalry_matchups=rivalry_matchups, recap=recap,
-            decision_lines=dec_lines, decision_awards=dec_awards) if do_pdf else None
+            decision_lines=dec_lines, decision_awards=dec_awards,
+            playoff_odds=playoff_odds) if do_pdf else None
         email_html = RND.render_email_html(season, awards, roasts, label,
                                            pdf_attached=bool(pdf_out))
         return season, html_out, pdf_out, label, email_html
@@ -177,7 +178,8 @@ def generate_one(league_id, month_arg=None, week_arg=None, do_season=False,
     pdf_out = PRND.render_pdf_html(
         season, awards, roasts, period_label=label,
         season_stats=ss, kind="monthly", month_stats=ms,
-        recap=recap, waiver_take=waiver_take) if do_pdf else None
+        recap=recap, waiver_take=waiver_take,
+        playoff_odds=playoff_odds) if do_pdf else None
     email_html = RND.render_email_html(season, awards, roasts, label,
                                        pdf_attached=bool(pdf_out))
     return season, html_out, pdf_out, label, email_html
