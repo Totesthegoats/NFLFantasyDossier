@@ -24,6 +24,7 @@ from . import stats as S
 
 DEFAULT_N_SIMS = 3000
 _MIN_GAMES_FOR_OWN_POOL = 3   # below this, a team's own history is too thin to bootstrap from
+MIN_WEEKS_FOR_ODDS = 4        # below this, don't report odds at all (see odds_for_report)
 
 
 def _team_actual_scores(season, roster_id: int, upto_week: int) -> dict:
@@ -186,12 +187,21 @@ def odds_for_report(season, upto_week: int, weeks: list):
     Returns ({}, None) once the regular season is over: there is no remaining
     schedule to simulate, so every team's odds are already decided and the
     table would just print 100s and 0s.
+
+    Also returns ({}, None) before MIN_WEEKS_FOR_ODDS. Every team is below
+    _MIN_GAMES_FOR_OWN_POOL that early, so they all bootstrap from the same
+    league-wide pool and the "odds" mostly restate who happens to be 1-0 —
+    a precise-looking number with nothing behind it.
     """
     from . import data as D
     from . import waivers as W
 
     last_regular = season.playoff_week_start - 1
     if upto_week >= last_regular:
+        return {}, None
+    from .render import _FORCE_APPENDIX
+    if (not _FORCE_APPENDIX
+            and len([w for w in season.weeks if w <= upto_week]) < MIN_WEEKS_FOR_ODDS):
         return {}, None
 
     schedule = D.remaining_schedule(season, upto_week, last_regular)

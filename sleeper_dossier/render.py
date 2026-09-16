@@ -9,6 +9,7 @@ Both consume the same inputs so you can offer text now and HTML later.
 """
 
 from __future__ import annotations
+import os
 import html
 import json
 import statistics
@@ -905,8 +906,10 @@ def _manager_chart_specs(season, weeks: list, upto_week=None) -> list:
     if not weeks:
         return specs
     last = upto_week if upto_week is not None else max(weeks)
+    played = _weeks_played(season, last)
 
-    matrix = MG.schedule_swap_matrix(season, upto_week=last)
+    matrix = (MG.schedule_swap_matrix(season, upto_week=last)
+              if played >= _MIN_WEEKS_SCHEDULE else {})
     if matrix and len(matrix) > 1:
         labels = [_short_name(season.team_name(rid)) for rid in sorted(matrix)]
         cells = []
@@ -952,7 +955,8 @@ def _manager_chart_specs(season, weeks: list, upto_week=None) -> list:
                                    (0, cap), (0, cap), with_diagonal=True,
                                    tall=True, caption_key="timing_chart"))
 
-    fp = MG.manager_fingerprint(season, weeks, upto_week=last)
+    fp = (MG.manager_fingerprint(season, weeks, upto_week=last)
+          if played >= _MIN_WEEKS_FINGERPRINT else {})
     if fp:
         cdv = MG.cumulative_decision_value(season, upto_week=last)
         if cdv:
@@ -1038,7 +1042,7 @@ def _weekly_appendix_chart_specs(season, week: int | None) -> list:
     newer appendix ones can be rendered into separate blocks.
     """
     specs = []
-    if week is not None:
+    if week is not None and _weeks_played(season, week) >= _MIN_WEEKS_DECISION_CHART:
         cdv = MG.cumulative_decision_value(season, upto_week=week)
         if cdv:
             weeks_axis = sorted({w for v in cdv.values() for (w, _d, _c) in v["series"]})
@@ -1329,6 +1333,48 @@ def _ordinal(n) -> str:
     return f"{n}{suffix}"
 
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Minimum data before the appendix analytics are worth showing
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Every one of these is a season-to-date measure, and each is actively
+# misleading on one or two weeks of data rather than merely imprecise:
+# Pythagorean expectation on a single game returns 0.5 expected wins for
+# everyone; the consistency CV is exactly 0% because one score has no
+# deviation; clutch record is 0-0; the schedule-swap grid is near-identical
+# for every team because there is only one fixture to permute; and a
+# cumulative line chart with a single x-value draws literally nothing.
+#
+# So they are hidden rather than shown empty. A reader who sees "Exp W 0.5"
+# for all twelve teams learns nothing and trusts the rest of the page less.
+
+# Set SLEEPER_SHOW_APPENDIX=1 to bypass every gate below and render the
+# appendix whatever the data looks like. For previewing the sections during
+# development — the numbers really are meaningless this early, which is the
+# whole reason the gates exist, so this is not meant for a subscriber build.
+_FORCE_APPENDIX = os.environ.get("SLEEPER_SHOW_APPENDIX", "").strip() not in ("", "0", "false")
+
+_MIN_WEEKS_DEEP_DIVE = 4        # Pythagorean / CV / optimal record / clutch
+_MIN_WEEKS_SCHEDULE = 4         # swap matrix and schedule luck
+_MIN_WEEKS_DECISION_CHART = 3   # cumulative decision value needs a slope to read
+_MIN_WEEKS_FINGERPRINT = 4      # radar axes jitter wildly before this
+_MIN_WEEKS_PLAYOFF_ODDS = 4     # below this every team bootstraps the same league pool
+
+
+def _weeks_played(season, upto_week=None) -> int:
+    """How many weeks of real results exist up to `upto_week`.
+
+    Returns a deliberately huge number when _FORCE_APPENDIX is set, so every
+    `played >= _MIN_...` gate passes without each call site needing its own
+    override branch.
+    """
+    if _FORCE_APPENDIX:
+        return 10_000
+    return len([w for w in season.weeks
+                if upto_week is None or w <= upto_week])
+
+
 def _appendix_html(blocks: list) -> str:
     """Wrap newly-added analytics in a clearly-labelled appendix.
 
@@ -1445,6 +1491,8 @@ def _deep_dive_html(season, weeks: list, upto_week=None) -> str:
     report must not leak later weeks' results.
     """
     last_week = upto_week if upto_week is not None else max(weeks)
+    if _weeks_played(season, last_week) < _MIN_WEEKS_DEEP_DIVE:
+        return ""
 
     py = S.pythagorean(season, upto_week=last_week)
     cons = S.consistency(season, upto_week=last_week)

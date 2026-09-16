@@ -1983,7 +1983,9 @@ _APPENDIX_W = 1010
 _APPENDIX_H = 360
 
 
-def _has_appendix(ctx): return bool(ctx.get("appendix_specs") or ctx.get("appendix_tables"))
+def _has_appendix(ctx):
+    """False when every appendix metric is still gated off by lack of data."""
+    return bool(ctx.get("appendix_specs") or (ctx.get("appendix_tables") or "").strip())
 
 
 def _render_appendix(ctx: dict) -> list:
@@ -2000,62 +2002,81 @@ def _render_appendix(ctx: dict) -> list:
     tables = ctx.get("appendix_tables") or ""
     if tables:
         pages.append(note + tables)
-    specs = ctx.get("appendix_specs") or []
-    for spec in specs:
+    for spec in (ctx.get("appendix_specs") or []):
         pages.append(_chart_box(spec, _APPENDIX_W, _APPENDIX_H))
-    return pages or [note + '<div style="color:#9aa7bd;padding:20px">Nothing to show yet.</div>']
+    # Early in the season every appendix metric is gated off. Return no pages
+    # rather than a page announcing that there is nothing on it.
+    return pages
 
 
 def _appendix_tables_html(season, weeks: list, upto_week: int, playoff_odds=None) -> str:
-    """Deep-dive and playoff-odds tables for the PDF appendix.
+    """Deep-dive, schedule-luck and playoff-odds tables for the PDF appendix.
 
-    Deliberately rebuilt here rather than reusing render.py's HTML: the PDF
-    has its own CSS vocabulary and page geometry, and importing the screen
-    markup produces tables that overflow the print column.
+    Uses the same vocabulary as every other PDF table — `stats-table`,
+    `section-label` headings and `_manager_cell` for the team column — so
+    the appendix reads as part of the document rather than as raw markup
+    someone forgot to style. An earlier version invented a `mini` class that
+    exists in no stylesheet, which is why these rendered unstyled.
     """
     from . import stats as S
     from . import manager as MG
+    from .render import _MIN_WEEKS_DEEP_DIVE, _MIN_WEEKS_SCHEDULE, _weeks_played
 
-    out = []
-    py = S.pythagorean(season, upto_week=upto_week)
-    cons = S.consistency(season, upto_week=upto_week)
-    opt = S.optimal_record(season, upto_week=upto_week)
-    clutch = S.clutch_record(season, upto_week=upto_week)
+    played = _weeks_played(season, upto_week)
+    blocks = []
+
+    py = (S.pythagorean(season, upto_week=upto_week)
+          if played >= _MIN_WEEKS_DEEP_DIVE else {})
+    cons = S.consistency(season, upto_week=upto_week) if py else {}
+    opt = S.optimal_record(season, upto_week=upto_week) if py else {}
+    clutch = S.clutch_record(season, upto_week=upto_week) if py else {}
     if py:
         rows = ""
         for rid, p in sorted(py.items(), key=lambda kv: kv[1]["delta"], reverse=True):
             c, o, cl = cons.get(rid, {}), opt.get(rid, {}), clutch.get(rid, {})
-            rows += (f"<tr><td>{_esc(season.team_name(rid))}</td>"
+            dcls = "lucky" if p["delta"] > 0 else ("robbed" if p["delta"] < 0 else "")
+            rows += (f"<tr>{_manager_cell(season, rid)}"
                      f"<td class='num'>{p['expected_wins']:.1f}</td>"
-                     f"<td class='num'>{p['delta']:+.1f}</td>"
+                     f"<td class='num {dcls}'>{p['delta']:+.1f}</td>"
                      f"<td class='num'>{o.get('wins', 0)}-{o.get('losses', 0)}</td>"
                      f"<td class='num'>{c.get('cv', 0):.0f}%</td>"
                      f"<td class='num'>{cl.get('wins', 0)}-{cl.get('losses', 0)}</td></tr>")
-        out.append("<h4>Deep Dive</h4><table class='mini'><tr><th>Team</th><th>Exp W</th>"
-                   "<th>vs Exp</th><th>Optimal</th><th>Swing</th><th>Close</th></tr>"
-                   f"{rows}</table>")
+        blocks.append('<div><h3 class="section-label">Deep Dive</h3>'
+                      '<table class="stats-table"><tr><th>Team</th><th>Exp W</th>'
+                      '<th>vs Exp</th><th>Optimal</th><th>Swing</th><th>Close</th></tr>'
+                      f'{rows}</table></div>')
 
-    luck = MG.schedule_luck(season, upto_week=upto_week)
+    luck = (MG.schedule_luck(season, upto_week=upto_week)
+            if played >= _MIN_WEEKS_SCHEDULE else {})
     if luck:
         rows = ""
         for rid, v in sorted(luck.items(), key=lambda kv: kv[1]["delta"], reverse=True):
-            rows += (f"<tr><td>{_esc(season.team_name(rid))}</td>"
+            dcls = "lucky" if v["delta"] > 0 else ("robbed" if v["delta"] < 0 else "")
+            rows += (f"<tr>{_manager_cell(season, rid)}"
                      f"<td class='num'>{v['actual']}</td>"
                      f"<td class='num'>{v['average']:.1f}</td>"
-                     f"<td class='num'>{v['delta']:+.1f}</td>"
-                     f"<td class='num'>{v['worst']}-{v['best']}</td></tr>")
-        out.append("<h4>Schedule Luck</h4><table class='mini'><tr><th>Team</th><th>Actual W</th>"
-                   "<th>Avg across all schedules</th><th>Luck</th><th>Range</th></tr>"
-                   f"{rows}</table>")
+                     f"<td class='num {dcls}'>{v['delta']:+.1f}</td>"
+                     f"<td class='num'>{v['worst']}&ndash;{v['best']}</td></tr>")
+        blocks.append('<div><h3 class="section-label">Schedule Luck</h3>'
+                      '<table class="stats-table"><tr><th>Team</th><th>Actual W</th>'
+                      '<th>Avg</th><th>Luck</th><th>Range</th></tr>'
+                      f'{rows}</table></div>')
 
     if playoff_odds:
-        rows = "".join(f"<tr><td>{_esc(season.team_name(rid))}</td>"
+        rows = "".join(f"<tr>{_manager_cell(season, rid)}"
                        f"<td class='num'>{o * 100:.1f}%</td></tr>"
                        for rid, o in sorted(playoff_odds.items(),
                                             key=lambda kv: kv[1], reverse=True))
-        out.append("<h4>Playoff Odds (Monte Carlo)</h4>"
-                   f"<table class='mini'><tr><th>Team</th><th>Odds</th></tr>{rows}</table>")
-    return "".join(out)
+        blocks.append('<div><h3 class="section-label">Playoff Odds (Monte Carlo)</h3>'
+                      '<table class="stats-table"><tr><th>Team</th><th>Odds</th></tr>'
+                      f'{rows}</table></div>')
+
+    if not blocks:
+        return ""
+    # Two per row, matching the other analytics pages, instead of one
+    # full-width table stack crammed against the left margin.
+    return f'<div class="cols-2">{"".join(blocks)}</div>'
+
 
 
 @dataclass
