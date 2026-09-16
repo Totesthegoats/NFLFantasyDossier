@@ -196,7 +196,8 @@ def main(argv=None):
         html_out = RND.render_html(season, awards, roasts, period_label=label,
                                    season_stats=ss, kind="monthly", month_stats=ms, recap=recap,
                                    waiver_take=waiver_take, playoff_odds=playoff_odds,
-                                   pickup_odds_swing=pickup_odds_swing)
+                                   pickup_odds_swing=pickup_odds_swing,
+                                   prev_month_stats=prev_ms)
 
     print(text)
     if args.html:

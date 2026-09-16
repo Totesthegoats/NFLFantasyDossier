@@ -120,3 +120,115 @@ def month_stats(season, month_weeks: list[int]) -> dict:
                   if rank_before else 0,
         )
     return out
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Month-scoped narrative: who won the month, who moved, what changed
+# ──────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class MonthVerdict:
+    """The month's headline result — the one sentence a reader wants first."""
+    roster_id: int
+    record: str
+    total_points: float
+    pts_above_avg: float
+    avg_efficiency: float
+    climb: int
+    runner_up_rid: int | None
+    margin: float          # points-above-average clear of the runner-up
+
+
+def manager_of_the_month(ms: dict) -> "MonthVerdict | None":
+    """Best manager over the month: most points above the league average.
+
+    This deliberately matches awards.m_manager_of_month exactly. That award
+    is the canonical Manager of the Month and appears on its own card in the
+    same report — ranking by any other rule here (wins first, say) produces a
+    different winner and the report contradicts itself on its own headline.
+    Any change to the definition belongs in both places or neither.
+
+    Points above average rather than raw points because month lengths differ,
+    and rather than record because a 3-2 built on the month's two biggest
+    scores is a better month than a 4-1 of narrow escapes.
+    """
+    if not ms:
+        return None
+    ranked = sorted(ms.values(), key=lambda m: m.pts_above_avg, reverse=True)
+    top = ranked[0]
+    runner = ranked[1] if len(ranked) > 1 else None
+    return MonthVerdict(
+        roster_id=top.roster_id,
+        record=f"{top.h2h_w}-{top.h2h_l}" + (f"-{top.h2h_t}" if top.h2h_t else ""),
+        total_points=top.total_points,
+        pts_above_avg=top.pts_above_avg,
+        avg_efficiency=top.avg_efficiency,
+        climb=top.climb,
+        runner_up_rid=runner.roster_id if runner else None,
+        margin=round(top.pts_above_avg - runner.pts_above_avg, 2) if runner else 0.0,
+    )
+
+
+def movers(ms: dict, min_climb: int = 1) -> dict:
+    """{"risers": [MonthTeam...], "fallers": [...]} by standings places moved
+    across the month, biggest move first.
+
+    Uses `climb` (rank entering the month minus rank leaving it), so this is
+    explicitly about the month rather than the season — a team can be
+    mid-table all year and still have had the month of their life.
+    """
+    if not ms:
+        return {"risers": [], "fallers": []}
+    moved = [m for m in ms.values() if m.climb is not None]
+    risers = sorted([m for m in moved if m.climb >= min_climb],
+                    key=lambda m: m.climb, reverse=True)
+    fallers = sorted([m for m in moved if m.climb <= -min_climb],
+                     key=lambda m: m.climb)
+    return {"risers": risers, "fallers": fallers}
+
+
+def month_over_month(ms: dict, prev_ms: dict | None) -> dict:
+    """roster_id -> {points_delta, efficiency_delta, wins_delta} against the
+    previous month, for the teams present in both.
+
+    This is the "what changed since you last heard from us" layer. Without
+    it every monthly issue reads as a standalone snapshot, and a reader has
+    no way to tell an improving team from a coasting one.
+    """
+    if not ms or not prev_ms:
+        return {}
+    out = {}
+    for rid, m in ms.items():
+        p = prev_ms.get(rid)
+        if not p:
+            continue
+        out[rid] = {
+            "points_delta": round(m.total_points - p.total_points, 2),
+            "avg_points_delta": round(m.avg_points - p.avg_points, 2),
+            "efficiency_delta": round(m.avg_efficiency - p.avg_efficiency, 1),
+            "wins_delta": m.h2h_w - p.h2h_w,
+        }
+    return out
+
+
+def month_shape(ms: dict) -> dict:
+    """League-wide facts about the month itself: scoring level, spread, and
+    how settled the table was. Used for the section lead-in, so a reader
+    knows what kind of month they're reading about before any team names
+    appear."""
+    if not ms:
+        return {}
+    totals = [m.total_points for m in ms.values()]
+    effs = [m.avg_efficiency for m in ms.values()]
+    climbs = [abs(m.climb) for m in ms.values()]
+    weeks = max((len(m.weeks) for m in ms.values()), default=0)
+    return {
+        "weeks": weeks,
+        "avg_total": round(statistics.mean(totals), 1),
+        "high_total": round(max(totals), 1),
+        "low_total": round(min(totals), 1),
+        "spread": round(max(totals) - min(totals), 1),
+        "avg_efficiency": round(statistics.mean(effs), 1) if effs else 0.0,
+        "total_places_moved": sum(climbs),
+        "settled": sum(climbs) <= len(ms),   # roughly: fewer than one place moved per team
+    }

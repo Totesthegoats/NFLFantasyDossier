@@ -17,6 +17,7 @@ import textwrap
 from . import stats as S
 from . import waivers as W
 from . import manager as MG
+from . import monthly as MTH
 from . import images as IMG
 
 
@@ -620,6 +621,31 @@ ul{margin:4px 0 12px;padding-left:20px;font-size:14px;line-height:1.6;}
 .rivalry-card .matchup{font-size:15px;font-weight:700;}
 .rivalry-card .matchup .winner{color:var(--green);}
 .rivalry-card .history{margin-top:6px;font-size:13px;color:#5b6b85;}
+
+/* --- Monthly narrative & structure ------------------------------------- */
+.section-head{margin:34px 0 10px;font-size:19px;font-style:italic;letter-spacing:-.3px;
+  text-transform:none;color:var(--navy);border-bottom:2px solid var(--navy);padding-bottom:6px;}
+.narrative{margin:18px 0 26px;}
+.narrative p{margin:10px 0;font-size:14.5px;line-height:1.65;}
+.narrative p.lead{font-size:16px;line-height:1.6;color:#2b3a55;}
+.verdict{background:var(--navy);color:#fff;border-radius:14px;padding:18px 22px;margin:16px 0;}
+.verdict-label{font-size:11px;text-transform:uppercase;letter-spacing:.14em;opacity:.75;}
+.verdict-name{font-size:26px;font-style:italic;letter-spacing:-.5px;margin:2px 0 8px;}
+.verdict-detail{font-size:13.5px;line-height:1.6;opacity:.92;}
+.contents{background:#fff;border:1px solid #e3e8f0;border-radius:14px;padding:16px 22px;margin:0 0 24px;}
+.contents h2{margin:0 0 8px;}
+.contents ol{margin:0;padding-left:20px;columns:2;font-size:13.5px;line-height:1.9;}
+.contents a{color:var(--navy);text-decoration:none;}
+.contents a:hover{text-decoration:underline;}
+@media print{
+  .section-head{break-after:avoid;page-break-after:avoid;}
+  .verdict{break-inside:avoid;page-break-inside:avoid;}
+  .narrative{break-inside:avoid;page-break-inside:avoid;}
+  table{break-inside:auto;}
+  tr{break-inside:avoid;page-break-inside:avoid;}
+  thead{display:table-header-group;}
+  h2,h3{break-after:avoid;page-break-after:avoid;}
+}
 @media screen{.print-only{display:none;}}
 @media print{
   body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}
@@ -1250,6 +1276,112 @@ def _card(season, a, roasts):
       </div></div>"""
 
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Monthly narrative — the report's opening argument
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _ordinal(n) -> str:
+    """1 -> 1st. "up 5 to 5" reads as a score; "up 5 to 5th" reads as a rank."""
+    if n is None:
+        return "—"
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def _contents_html(sections: list) -> str:
+    """Screen-only table of contents.
+
+    Print gets page breaks and running section heads instead — a list of
+    unclickable links is dead weight on paper, and the PDF reader already
+    has a page thumbnail rail.
+    """
+    if not sections:
+        return ""
+    items = "".join(
+        f'<li><a href="#{sid}">{html.escape(label)}</a></li>' for sid, label in sections)
+    return f'<nav class="contents screen-only"><h2>In This Issue</h2><ol>{items}</ol></nav>'
+
+
+def _month_narrative_html(season, ms: dict, prev_ms=None, period_label="") -> str:
+    """The lead section of the monthly report: what kind of month it was, who
+    won it, who moved, and what changed since the last issue.
+
+    A monthly report that opens with a standings table makes the reader do
+    the work of finding the story. This states it up front and leaves the
+    tables as evidence rather than as the argument.
+    """
+    if not ms:
+        return ""
+
+    shape = MTH.month_shape(ms)
+    verdict = MTH.manager_of_the_month(ms)
+    mv = MTH.movers(ms)
+    mom = MTH.month_over_month(ms, prev_ms)
+
+    parts = []
+
+    if shape:
+        settled = ("The table barely moved" if shape.get("settled")
+                   else f"{shape['total_places_moved']} places changed hands")
+        parts.append(
+            f'<p class="lead">{shape["weeks"]} weeks. Teams averaged '
+            f'<strong>{shape["avg_total"]:.0f}</strong> points across the month, from '
+            f'{shape["low_total"]:.0f} up to {shape["high_total"]:.0f} — a '
+            f'{shape["spread"]:.0f}-point spread, at {shape["avg_efficiency"]:.0f}% '
+            f'average lineup efficiency. {settled}.</p>')
+
+    if verdict:
+        runner = (f" — {verdict.margin:.1f} points clear of "
+                  f"{html.escape(season.team_name(verdict.runner_up_rid))}"
+                  if verdict.runner_up_rid else "")
+        climb = ""
+        if verdict.climb > 0:
+            climb = f" and climbed {verdict.climb} place{'s' if verdict.climb != 1 else ''}"
+        elif verdict.climb < 0:
+            climb = f" despite slipping {abs(verdict.climb)} place{'s' if verdict.climb != -1 else ''}"
+        parts.append(
+            f'<div class="verdict"><div class="verdict-label">Manager of the Month</div>'
+            f'<div class="verdict-name">{html.escape(season.team_name(verdict.roster_id))}</div>'
+            f'<div class="verdict-detail">Went <strong>{verdict.record}</strong> for '
+            f'<strong>{verdict.total_points:.1f}</strong> points '
+            f'({verdict.pts_above_avg:+.1f} vs the league average){climb}{runner}. '
+            f'Started {verdict.avg_efficiency:.0f}% of their available points.</div></div>')
+
+    move_bits = []
+    if mv["risers"]:
+        r = mv["risers"][0]
+        move_bits.append(f'<strong>Riser:</strong> {html.escape(season.team_name(r.roster_id))} '
+                         f'up {r.climb} to {_ordinal(r.rank_end)}')
+    if mv["fallers"]:
+        f_ = mv["fallers"][0]
+        move_bits.append(f'<strong>Faller:</strong> {html.escape(season.team_name(f_.roster_id))} '
+                         f'down {abs(f_.climb)} to {_ordinal(f_.rank_end)}')
+    if move_bits:
+        parts.append(f'<p>{" &nbsp;·&nbsp; ".join(move_bits)}</p>')
+
+    if mom:
+        gain = max(mom.items(), key=lambda kv: kv[1]["points_delta"])
+        drop = min(mom.items(), key=lambda kv: kv[1]["points_delta"])
+        if gain[1]["points_delta"] > 0:
+            parts.append(
+                f'<p><strong>Since last month:</strong> '
+                f'{html.escape(season.team_name(gain[0]))} scored '
+                f'{gain[1]["points_delta"]:+.0f} points more than they did last month; '
+                f'{html.escape(season.team_name(drop[0]))} scored '
+                f'{drop[1]["points_delta"]:+.0f}.</p>')
+
+    if not parts:
+        return ""
+    heading = html.escape(period_label) if period_label else "The Month"
+    return (f'<section class="narrative"><h2 class="section-head">{heading}: '
+            f'What Happened</h2>{"".join(parts)}</section>')
+
+
 def _deep_dive_html(season, weeks: list, upto_week=None) -> str:
     """The Deep Dive section: Pythagorean expectation, scoring volatility,
     optimal-lineup record, close-game record, and waiver ROI.
@@ -1345,7 +1477,7 @@ def _deep_dive_html(season, weeks: list, upto_week=None) -> str:
 
 def render_html(season, awards, roasts, period_label, season_stats=None,
                 kind="monthly", month_stats=None, recap="", waiver_take="", tier="normal",
-                playoff_odds=None, pickup_odds_swing=None):
+                playoff_odds=None, pickup_odds_swing=None, prev_month_stats=None):
     fame = [a for a in awards if a.hall == "fame"]
     shame = [a for a in awards if a.hall == "shame"]
     title = period_label
@@ -1531,6 +1663,20 @@ def render_html(season, awards, roasts, period_label, season_stats=None,
     if weeks:
         deep_dive_html = _deep_dive_html(season, weeks, upto_week)
 
+    contents_html = _contents_html([
+        ("sec-month", "The Month in Detail"),
+        ("sec-standings", "Where Everyone Stands"),
+        ("sec-deep", "Under the Hood"),
+        ("sec-market", "The Market"),
+        ("sec-outlook", "The Outlook"),
+        ("sec-charts", "The Charts"),
+    ]) if kind == "monthly" else ""
+
+    narrative_html = ""
+    if kind == "monthly":
+        narrative_html = _month_narrative_html(season, month_stats or {},
+                                               prev_month_stats, period_label)
+
     chart_specs = _season_chart_specs(season, season_stats, month_stats, upto_week)
     chart_specs += _manager_chart_specs(season, weeks, upto_week)
     if kind == "season":
@@ -1565,7 +1711,10 @@ def render_html(season, awards, roasts, period_label, season_stats=None,
       Season: {html.escape(season.season)} &nbsp; Managers: {len(season.teams)}</div>
   </div>
 
+  {contents_html}
+
   {recap_html}
+  {narrative_html}
 
   <div class="bar fame page-start">🏆 Hall of Fame</div>
   <div class="grid">{fame_cards}</div>
@@ -1575,21 +1724,29 @@ def render_html(season, awards, roasts, period_label, season_stats=None,
 
   <div class="page-start"></div>
 
+  <h2 class="section-head" id="sec-month">The Month in Detail</h2>
   {month_html}
   {closest_html}
 
   {pdf_table}
 
-  <h2 class="screen-only">{standings_heading}</h2>
+  <h2 class="section-head screen-only" id="sec-standings">Where Everyone Stands</h2>
+  <h3 class="screen-only">{standings_heading}</h3>
   <table class="screen-only"><tr><th>#</th><th>Team</th><th>W-L</th><th>PF</th><th>PA</th><th>Form</th></tr>{st_rows}</table>
-
-  {charts_html}
-
   <div class="screen-only">{power_rank_html}{luck_html}{median_html}</div>
+
+  <h2 class="section-head page-start" id="sec-deep">Under the Hood</h2>
   {deep_dive_html}
   {draft_value_html}
-  {playoff_html}
+
+  <h2 class="section-head page-start" id="sec-market">The Market</h2>
   {waiver_html}
+
+  <h2 class="section-head page-start" id="sec-outlook">The Outlook</h2>
+  {playoff_html}
+
+  <h2 class="section-head page-start" id="sec-charts">The Charts</h2>
+  {charts_html}
 </div></body></html>"""
 
 
