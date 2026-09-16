@@ -84,6 +84,8 @@ class SeasonData:
     trades: list = field(default_factory=list)
     draft_picks: dict = field(default_factory=dict)   # player_id -> {"pick_no", "round", "roster_id", "is_keeper"}
     faab_budget: int = 100                            # league-wide starting FAAB cap
+    playoff_teams: int = 0                            # how many teams make the postseason
+    playoff_week_start: int = 15                       # first playoff week; last regular-season week is this - 1
 
     def team_name(self, roster_id):
         t = self.teams.get(roster_id)
@@ -246,6 +248,32 @@ def _week_was_played(wd: dict) -> bool:
     return any((t.points or 0) > 0 for t in wd.values())
 
 
+def fetch_week_schedule(league_id: str, week: int) -> dict:
+    """roster_id -> matchup_id for a week, regardless of whether it's been
+    played. fetch_season only keeps weeks _week_was_played says are real, so
+    a not-yet-played week's pairings (who plays whom — fixed at season
+    start, not the same as its score) aren't otherwise available; the
+    Monte Carlo playoff sim needs exactly this."""
+    matchups = _get(f"{API}/league/{league_id}/matchups/{week}") or []
+    return {m["roster_id"]: m.get("matchup_id") for m in matchups}
+
+
+def remaining_schedule(season: SeasonData, upto_week: int, through_week: int) -> dict:
+    """week -> {roster_id: matchup_id} for weeks (upto_week, through_week].
+    Reuses season.weeks' own pairings for any week already fetched (no
+    extra API call) and falls back to fetch_week_schedule only for weeks
+    fetch_season didn't keep because they hadn't been played yet — which,
+    for a retrospective report on an earlier month, may be none at all."""
+    schedule = {}
+    for wk in range(upto_week + 1, through_week + 1):
+        wd = season.weeks.get(wk)
+        if wd:
+            schedule[wk] = {rid: wt.matchup_id for rid, wt in wd.items()}
+        else:
+            schedule[wk] = fetch_week_schedule(season.league_id, wk)
+    return schedule
+
+
 def _fetch_draft_picks(draft_id: str) -> dict:
     """player_id -> draft slot info for this league's draft. Best-effort:
     leagues with no recorded draft (or a draft_id Sleeper hasn't populated
@@ -299,7 +327,10 @@ def fetch_season(league_id: str, fetch_transactions: bool = True) -> SeasonData:
     except requests.RequestException:
         draft_picks = {}
 
-    faab_budget = int((league.get("settings") or {}).get("waiver_budget", 100) or 100)
+    settings = league.get("settings") or {}
+    faab_budget = int(settings.get("waiver_budget", 100) or 100)
+    playoff_week_start = int(settings.get("playoff_week_start") or 15)
+    playoff_teams = int(settings.get("playoff_teams") or (len(teams) // 2) or 1)
 
     return SeasonData(
         league_id=league_id,
@@ -313,4 +344,6 @@ def fetch_season(league_id: str, fetch_transactions: bool = True) -> SeasonData:
         trades=trades,
         draft_picks=draft_picks,
         faab_budget=faab_budget,
+        playoff_teams=playoff_teams,
+        playoff_week_start=playoff_week_start,
     )

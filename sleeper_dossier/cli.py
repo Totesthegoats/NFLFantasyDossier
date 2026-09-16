@@ -41,6 +41,7 @@ from . import monthly as M
 from . import waivers as W
 from . import history as H
 from . import decision as DEC
+from . import sim as SIM
 
 
 def _parse_month(s):
@@ -180,12 +181,24 @@ def main(argv=None):
         waiver_take = "" if args.no_roast else R.write_waiver_take(
             season, kind="monthly", period=period, best=best, worst=worst,
             faab_totals=faab_totals, trades=trades)
+
+        # Monte Carlo playoff odds — bootstrapped rest-of-season projection,
+        # plus how much this period's best-value pickup moved its team's odds.
+        upto_week = max(weeks)
+        schedule = D.remaining_schedule(season, upto_week, season.playoff_week_start - 1)
+        playoff_odds = SIM.simulate_playoff_odds(season, upto_week, schedule, season.playoff_teams)
+        por_pickup = W.best_por_period(season, weeks)
+        pickup_odds_swing = SIM.pickup_playoff_impact(
+            season, upto_week, schedule, season.playoff_teams, por_pickup) if por_pickup else None
+
         text = RND.render_text(season, awards, roasts, period_label=label,
                                season_stats=ss, kind="monthly", month_stats=ms, recap=recap,
-                               waiver_take=waiver_take)
+                               waiver_take=waiver_take, playoff_odds=playoff_odds,
+                               pickup_odds_swing=pickup_odds_swing)
         html_out = RND.render_html(season, awards, roasts, period_label=label,
                                    season_stats=ss, kind="monthly", month_stats=ms, recap=recap,
-                                   waiver_take=waiver_take)
+                                   waiver_take=waiver_take, playoff_odds=playoff_odds,
+                                   pickup_odds_swing=pickup_odds_swing)
 
     print(text)
     if args.html:

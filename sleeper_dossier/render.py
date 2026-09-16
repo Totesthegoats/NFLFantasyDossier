@@ -45,6 +45,22 @@ CAPTIONS = {
         "of consistency.",
     "rivalry_watch":
         "Head-to-head history between this week's opponents, including current streaks.",
+    "pythagorean":
+        "Expected wins from your own points for and against. Ahead of it means you've "
+        "converted your scoring into more wins than it should have bought; behind it "
+        "means the scoreboard owes you.",
+    "consistency":
+        "How much your weekly score swings, as a % of your average — so it's fair "
+        "between high and low scorers. Low = reliable floor, high = boom-or-bust.",
+    "optimal_record":
+        "The record everyone would have if BOTH sides started their best possible "
+        "lineup every week. The gap is what your bench decisions actually cost — or "
+        "saved — you.",
+    "clutch":
+        "Record in games decided by under 5 points. Small samples, big arguments.",
+    "waiver_roi":
+        "Fantasy points per FAAB dollar, counting only pickups you actually paid for. "
+        "Free-agent adds are listed separately since you can't overpay for free.",
     "luck_chart_season":
         "Points scored vs. luck — top-right got good results and earned them; "
         "bottom-right scored well but got unlucky.",
@@ -151,7 +167,8 @@ def _closest_game(season, weeks: list):
 # ----------------------------------------------------------------------
 
 def render_text(season, awards, roasts, period_label, season_stats=None,
-                kind="monthly", month_stats=None, recap="", waiver_take=""):
+                kind="monthly", month_stats=None, recap="", waiver_take="",
+                playoff_odds=None, pickup_odds_swing=None):
     L = []
     header = f"{season.name} — {period_label}"
     L.append("=" * 64)
@@ -209,6 +226,16 @@ def render_text(season, awards, roasts, period_label, season_stats=None,
         wl = f"{r['w']}-{r['l']}" + (f"-{r['ties']}" if r['ties'] else "")
         L.append(f"  {i:<3}{r['team'][:23]:<24}{wl:<8}{r['pf']:>8.1f}{r['pa']:>8.1f}")
 
+    # Monte Carlo playoff odds — Monte Carlo projection of the rest of the
+    # regular season, bootstrapped from each team's own scoring so far.
+    if playoff_odds:
+        L.append("\n" + "-" * 64)
+        L.append("  PLAYOFF ODDS  (Monte Carlo, rest of regular season)")
+        L.append("-" * 64)
+        ranked_odds = sorted(playoff_odds.items(), key=lambda kv: kv[1], reverse=True)
+        for rid, odds in ranked_odds:
+            L.append(f"  {season.team_name(rid)[:23]:<24}{odds * 100:>6.1f}%")
+
     # Team form (weekly score sparkline across the period)
     if weeks:
         L.append("\n" + "-" * 64)
@@ -251,6 +278,18 @@ def render_text(season, awards, roasts, period_label, season_stats=None,
                 top = sorted(faab_totals.items(), key=lambda kv: kv[1], reverse=True)[:3]
                 spend_str = ", ".join(f"{season.team_name(rid)} ${amt}" for rid, amt in top)
                 L.append(f"  Top FAAB spend: {spend_str}")
+            por = W.best_por_period(season, weeks)
+            if por:
+                swing = f", {pickup_odds_swing:+.1f}% playoff odds" if pickup_odds_swing is not None else ""
+                L.append(f"  Best value pickup (pts over replacement): {season.team_name(por.roster_id)}"
+                         f" added {por.player_name} ({por.position}) -> +{por.por:.1f} pts over a"
+                         f" replacement-level {por.position} over {por.games} games{swing}")
+            sharpe = W.sharpe_by_position(season, weeks)
+            if sharpe:
+                top_pos, s = max(sharpe.items(), key=lambda kv: kv[1]["avg_sharpe"])
+                L.append(f"  Most reliable position off the wire: {top_pos}"
+                         f" (avg Sharpe {s['avg_sharpe']:.2f} across {s['n']} pickups,"
+                         f" best: {s['best'].player_name} at {s['best'].sharpe:.2f})")
             if trades:
                 L.append(f"\n  Trades ({len(trades)}):")
                 for t in trades:
@@ -941,8 +980,102 @@ def _card(season, a, roasts):
       </div></div>"""
 
 
+def _deep_dive_html(season, weeks: list, upto_week=None) -> str:
+    """The Deep Dive section: Pythagorean expectation, scoring volatility,
+    optimal-lineup record, close-game record, and waiver ROI.
+
+    Each is a season-to-date measure, so it's built from `upto_week` (the
+    report's cutoff) rather than live team totals — a retrospective monthly
+    report must not leak later weeks' results.
+    """
+    last_week = upto_week if upto_week is not None else max(weeks)
+
+    py = S.pythagorean(season, upto_week=last_week)
+    cons = S.consistency(season, upto_week=last_week)
+    opt = S.optimal_record(season, upto_week=last_week)
+    strk = S.streaks(season, upto_week=last_week)
+    clutch = S.clutch_record(season, upto_week=last_week)
+    if not py:
+        return ""
+
+    rows = ""
+    for rid, p in sorted(py.items(), key=lambda kv: kv[1]["delta"], reverse=True):
+        c = cons.get(rid, {})
+        o = opt.get(rid, {})
+        st = strk.get(rid, {})
+        cl = clutch.get(rid, {})
+        d_cls = "lucky" if p["delta"] > 0 else ("robbed" if p["delta"] < 0 else "")
+        o_delta = o.get("delta", 0)
+        o_cls = "robbed" if o_delta > 0 else ("lucky" if o_delta < 0 else "")
+        opt_cell = (f"{o.get('wins', 0)}-{o.get('losses', 0)}"
+                    f" <span class='{o_cls}'>({o_delta:+d})</span>") if o else "—"
+        streak_cell = (f"{st['current']}{st['current_kind']}"
+                       if st.get("current") else "—")
+        clutch_cell = f"{cl['wins']}-{cl['losses']}" if cl else "—"
+        rows += (f"<tr><td>{html.escape(season.team_name(rid))}</td>"
+                 f"<td class='num'>{p['expected_wins']:.1f}</td>"
+                 f"<td class='num {d_cls}'>{p['delta']:+.1f}</td>"
+                 f"<td class='num'>{opt_cell}</td>"
+                 f"<td class='num'>{c.get('cv', 0):.0f}%</td>"
+                 f"<td class='num'>{c.get('floor', 0):.0f}–{c.get('ceiling', 0):.0f}</td>"
+                 f"<td class='num'>{clutch_cell}</td>"
+                 f"<td class='num'>{streak_cell}</td></tr>")
+
+    table = f"""<table><tr><th>Team</th><th>Exp W</th><th>vs Exp</th><th>Optimal</th>
+      <th>Swing</th><th>Floor–Ceiling</th><th>Close</th><th>Streak</th></tr>{rows}</table>"""
+
+    bits = []
+    biggest = max(opt.items(), key=lambda kv: kv[1]["delta"], default=None)
+    if biggest and biggest[1]["delta"] > 0:
+        rid, o = biggest
+        bits.append(f"<p><strong>Most wins left on the bench:</strong> "
+                    f"{html.escape(season.team_name(rid))} — {o['actual_wins']}-{o['actual_losses']} "
+                    f"actual, but {o['wins']}-{o['losses']} if they'd started their best lineup "
+                    f"every week ({o['delta']:+d}).</p>")
+    if cons:
+        swingiest = max(cons.items(), key=lambda kv: kv[1]["cv"])
+        steadiest = min(cons.items(), key=lambda kv: kv[1]["cv"])
+        bits.append(f"<p><strong>Boom or bust:</strong> "
+                    f"{html.escape(season.team_name(swingiest[0]))} "
+                    f"({swingiest[1]['cv']:.0f}% swing, {swingiest[1]['floor']:.0f}–"
+                    f"{swingiest[1]['ceiling']:.0f}) &nbsp;·&nbsp; "
+                    f"<strong>Metronome:</strong> "
+                    f"{html.escape(season.team_name(steadiest[0]))} "
+                    f"({steadiest[1]['cv']:.0f}%).</p>")
+    longest = max(strk.items(), key=lambda kv: kv[1]["longest_win"], default=None)
+    if longest and longest[1]["longest_win"] >= 3:
+        bits.append(f"<p><strong>Longest win streak:</strong> "
+                    f"{html.escape(season.team_name(longest[0]))} — "
+                    f"{longest[1]['longest_win']} straight.</p>")
+
+    roi_html = ""
+    roi = W.waiver_roi(season, weeks)
+    paid = {rid: v for rid, v in roi.items() if v["roi"] is not None}
+    if paid:
+        roi_rows = ""
+        for rid, v in sorted(paid.items(), key=lambda kv: kv[1]["roi"], reverse=True):
+            free = (f"{v['free_adds']} free (+{v['free_points']:.0f})"
+                    if v["free_adds"] else "—")
+            roi_rows += (f"<tr><td>{html.escape(season.team_name(rid))}</td>"
+                         f"<td class='num'>${v['faab']}</td>"
+                         f"<td class='num'>{v['points']:.1f}</td>"
+                         f"<td class='num'>{v['roi']:.2f}</td>"
+                         f"<td class='num'>{free}</td></tr>")
+        roi_html = f"""<h2>Waiver ROI — Points per FAAB Dollar</h2>
+          {_caption_html("waiver_roi")}
+          <table><tr><th>Team</th><th>Spent</th><th>Points</th><th>Pts/$</th>
+          <th>Free adds</th></tr>{roi_rows}</table>"""
+
+    return f"""<h2>Deep Dive</h2>
+      {_caption_html("pythagorean")}
+      {table}
+      {''.join(bits)}
+      {roi_html}"""
+
+
 def render_html(season, awards, roasts, period_label, season_stats=None,
-                kind="monthly", month_stats=None, recap="", waiver_take="", tier="normal"):
+                kind="monthly", month_stats=None, recap="", waiver_take="", tier="normal",
+                playoff_odds=None, pickup_odds_swing=None):
     fame = [a for a in awards if a.hall == "fame"]
     shame = [a for a in awards if a.hall == "shame"]
     title = period_label
@@ -999,6 +1132,14 @@ def render_html(season, awards, roasts, period_label, season_stats=None,
                         f'{html.escape(season.team_name(loser))} by just {margin:.1f} '
                         f'({hi:.1f}–{lo:.1f})</div>')
 
+    playoff_html = ""
+    if playoff_odds:
+        rows = "".join(f"<tr><td>{html.escape(season.team_name(rid))}</td>"
+                       f"<td class='num'>{odds * 100:.1f}%</td></tr>"
+                       for rid, odds in sorted(playoff_odds.items(), key=lambda kv: kv[1], reverse=True))
+        playoff_html = (f"<h2>Playoff Odds (Monte Carlo, rest of regular season)</h2>"
+                        f"<table><tr><th>Team</th><th>Odds</th></tr>{rows}</table>")
+
     waiver_html = ""
     if weeks:
         best = W.best_pickup_period(season, weeks)
@@ -1018,6 +1159,20 @@ def render_html(season, awards, roasts, period_label, season_stats=None,
                 top = sorted(faab_totals.items(), key=lambda kv: kv[1], reverse=True)[:3]
                 spend_str = ", ".join(f"{html.escape(season.team_name(rid))} (${amt})" for rid, amt in top)
                 bits.append(f"<p><strong>Top FAAB spend:</strong> {spend_str}</p>")
+            por = W.best_por_period(season, weeks)
+            if por:
+                swing = f", {pickup_odds_swing:+.1f}% playoff odds" if pickup_odds_swing is not None else ""
+                bits.append(f'<p><strong>Best value pickup (pts over replacement):</strong> '
+                           f'{html.escape(season.team_name(por.roster_id))} added '
+                           f'{html.escape(por.player_name)} ({html.escape(por.position or "?")}) '
+                           f'&rarr; +{por.por:.1f} pts over a replacement-level {html.escape(por.position or "?")} '
+                           f'over {por.games} games{html.escape(swing)}</p>')
+            sharpe = W.sharpe_by_position(season, weeks)
+            if sharpe:
+                top_pos, s = max(sharpe.items(), key=lambda kv: kv[1]["avg_sharpe"])
+                bits.append(f'<p><strong>Most reliable position off the wire:</strong> '
+                           f'{html.escape(top_pos)} (avg Sharpe {s["avg_sharpe"]:.2f} across {s["n"]} pickups; '
+                           f'best: {html.escape(s["best"].player_name)} at {s["best"].sharpe:.2f})</p>')
             if trades:
                 trade_rows = "".join(f"<li>Week {t.week}: {html.escape(_format_trade(season, t))}</li>" for t in trades)
                 bits.append(f"<p><strong>Trades ({len(trades)}):</strong></p><ul>{trade_rows}</ul>")
@@ -1102,6 +1257,10 @@ def render_html(season, awards, roasts, period_label, season_stats=None,
               {_caption_html("median_whatif_to_date")}
               <table><tr><th>Team</th><th>Record vs Median</th></tr>{rows}</table>"""
 
+    deep_dive_html = ""
+    if weeks:
+        deep_dive_html = _deep_dive_html(season, weeks, upto_week)
+
     month_html = ""
     if month_stats:
         rows = ""
@@ -1151,7 +1310,9 @@ def render_html(season, awards, roasts, period_label, season_stats=None,
   {_charts_html(_season_chart_specs(season, season_stats, month_stats, upto_week))}
 
   <div class="screen-only">{power_rank_html}{luck_html}{median_html}</div>
+  {deep_dive_html}
   {draft_value_html}
+  {playoff_html}
   {waiver_html}
 </div></body></html>"""
 

@@ -339,6 +339,198 @@ def power_rank(season, upto_week: int, form_window: int = 3) -> dict:
     return out
 
 
+PYTHAG_EXPONENT = 2.37
+
+CLUTCH_MARGIN = 5.0
+
+
+def pythagorean(season, upto_week: int | None = None) -> dict:
+    """roster_id -> {expected_pct, expected_wins, actual_wins, games, delta}.
+
+    Expected win% = PF^k / (PF^k + PA^k). Unlike the luck index (which
+    benchmarks against all-play, i.e. the rest of the league's scores),
+    this one only looks at a team's own points for and against — so a team
+    can look lucky here and unlucky there, which is the interesting case:
+    all-play says "you'd beat most teams", Pythagoras says "you outscored
+    what your own schedule threw at you".
+
+    k=2.37 is the Football Outsiders NFL exponent; fantasy scoring spreads
+    are wide enough that anything in the 2.3-2.5 range behaves similarly.
+    """
+    acc = standings_through(season, upto_week)
+    out = {}
+    for rid, a in acc.items():
+        games = a["wins"] + a["losses"] + a["ties"]
+        if not games:
+            continue
+        pf, pa = a["pf"], a["pa"]
+        denom = (pf ** PYTHAG_EXPONENT) + (pa ** PYTHAG_EXPONENT)
+        pct = (pf ** PYTHAG_EXPONENT) / denom if denom else 0.5
+        expected_wins = pct * games
+        actual_wins = a["wins"] + 0.5 * a["ties"]
+        out[rid] = {
+            "expected_pct": round(pct * 100, 1),
+            "expected_wins": round(expected_wins, 1),
+            "actual_wins": actual_wins,
+            "games": games,
+            "delta": round(actual_wins - expected_wins, 1),
+        }
+    return out
+
+
+def consistency(season, upto_week: int | None = None) -> dict:
+    """roster_id -> {mean, stdev, cv, floor, ceiling, range}.
+
+    cv (coefficient of variation, stdev/mean as a %) is the headline: it
+    makes volatility comparable between a 140-point-a-week juggernaut and
+    a 80-point one, where raw stdev would just track scoring level. Low cv
+    = sets a floor every week; high cv = boom-or-bust.
+    """
+    out = {}
+    for rid in season.teams:
+        scores = []
+        for wk in sorted(season.weeks.keys()):
+            if upto_week is not None and wk > upto_week:
+                break
+            wt = season.weeks[wk].get(rid)
+            if wt is not None:
+                scores.append(wt.points)
+        if not scores:
+            continue
+        mean = statistics.mean(scores)
+        stdev = statistics.pstdev(scores) if len(scores) > 1 else 0.0
+        out[rid] = {
+            "mean": round(mean, 2),
+            "stdev": round(stdev, 2),
+            "cv": round(stdev / mean * 100, 1) if mean else 0.0,
+            "floor": round(min(scores), 2),
+            "ceiling": round(max(scores), 2),
+            "range": round(max(scores) - min(scores), 2),
+            "games": len(scores),
+        }
+    return out
+
+
+def optimal_record(season, upto_week: int | None = None) -> dict:
+    """roster_id -> {wins, losses, ties, actual_wins, actual_losses, delta}:
+    the record every team would hold if BOTH sides of every matchup had
+    started their optimal lineup.
+
+    The season-long counterpart to weekly lineup efficiency — efficiency
+    says "you left 18 points on the bench", this says whether those points
+    would actually have changed anything. Both sides are optimized on
+    purpose: "what if only I'd been perfect" flatters everyone, while
+    perfect-vs-perfect isolates who genuinely drafted better.
+    """
+    acc = {rid: {"wins": 0, "losses": 0, "ties": 0, "actual_wins": 0, "actual_losses": 0}
+           for rid in season.teams}
+    for wk in sorted(season.weeks.keys()):
+        if upto_week is not None and wk > upto_week:
+            break
+        wd = season.weeks[wk]
+        eff = lineup_efficiency(season, wd)
+        for ra, pa, rb, pb in matchup_pairs(wd):
+            oa = eff[ra].optimal if ra in eff else pa
+            ob = eff[rb].optimal if rb in eff else pb
+            for rid in (ra, rb):
+                acc.setdefault(rid, {"wins": 0, "losses": 0, "ties": 0,
+                                     "actual_wins": 0, "actual_losses": 0})
+            if oa > ob:
+                acc[ra]["wins"] += 1; acc[rb]["losses"] += 1
+            elif ob > oa:
+                acc[rb]["wins"] += 1; acc[ra]["losses"] += 1
+            else:
+                acc[ra]["ties"] += 1; acc[rb]["ties"] += 1
+            if pa > pb:
+                acc[ra]["actual_wins"] += 1; acc[rb]["actual_losses"] += 1
+            elif pb > pa:
+                acc[rb]["actual_wins"] += 1; acc[ra]["actual_losses"] += 1
+
+    out = {}
+    for rid, a in acc.items():
+        if not (a["wins"] + a["losses"] + a["ties"]):
+            continue
+        a["delta"] = a["wins"] - a["actual_wins"]
+        out[rid] = a
+    return out
+
+
+def streaks(season, upto_week: int | None = None) -> dict:
+    """roster_id -> {current, current_kind, longest_win, longest_loss}.
+
+    `current` is the length of the active run and `current_kind` is "W"/"L"
+    /"T"; ties end a streak rather than extending it either way.
+    """
+    seq = {rid: [] for rid in season.teams}
+    for wk in sorted(season.weeks.keys()):
+        if upto_week is not None and wk > upto_week:
+            break
+        for ra, pa, rb, pb in matchup_pairs(season.weeks[wk]):
+            seq.setdefault(ra, []); seq.setdefault(rb, [])
+            if pa > pb:
+                seq[ra].append("W"); seq[rb].append("L")
+            elif pb > pa:
+                seq[rb].append("W"); seq[ra].append("L")
+            else:
+                seq[ra].append("T"); seq[rb].append("T")
+
+    out = {}
+    for rid, results in seq.items():
+        if not results:
+            continue
+        current, current_kind = 0, results[-1]
+        for r in reversed(results):
+            if r != current_kind:
+                break
+            current += 1
+        longest = {"W": 0, "L": 0}
+        run, kind = 0, None
+        for r in results:
+            run = run + 1 if r == kind else 1
+            kind = r
+            if r in longest:
+                longest[r] = max(longest[r], run)
+        out[rid] = {
+            "current": current,
+            "current_kind": current_kind,
+            "longest_win": longest["W"],
+            "longest_loss": longest["L"],
+            "results": "".join(results),
+        }
+    return out
+
+
+def clutch_record(season, upto_week: int | None = None, margin: float = CLUTCH_MARGIN) -> dict:
+    """roster_id -> {wins, losses, ties, games, pct}: record in matchups
+    decided by less than `margin` points. Small samples by nature — a 4-1
+    here is a talking point, not evidence of a clutch gene."""
+    acc = {rid: {"wins": 0, "losses": 0, "ties": 0} for rid in season.teams}
+    for wk in sorted(season.weeks.keys()):
+        if upto_week is not None and wk > upto_week:
+            break
+        for ra, pa, rb, pb in matchup_pairs(season.weeks[wk]):
+            if abs(pa - pb) >= margin:
+                continue
+            for rid in (ra, rb):
+                acc.setdefault(rid, {"wins": 0, "losses": 0, "ties": 0})
+            if pa > pb:
+                acc[ra]["wins"] += 1; acc[rb]["losses"] += 1
+            elif pb > pa:
+                acc[rb]["wins"] += 1; acc[ra]["losses"] += 1
+            else:
+                acc[ra]["ties"] += 1; acc[rb]["ties"] += 1
+
+    out = {}
+    for rid, a in acc.items():
+        games = a["wins"] + a["losses"] + a["ties"]
+        if not games:
+            continue
+        a["games"] = games
+        a["pct"] = round((a["wins"] + 0.5 * a["ties"]) / games * 100, 1)
+        out[rid] = a
+    return out
+
+
 def season_metric_distribution(season, metric_fn, upto_week: int | None = None) -> list:
     """One value per team per played week (up to upto_week), via
     metric_fn(season, week, week_data) -> {roster_id: float}. The
