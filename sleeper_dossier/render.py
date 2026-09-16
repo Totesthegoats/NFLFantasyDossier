@@ -16,6 +16,7 @@ import textwrap
 
 from . import stats as S
 from . import waivers as W
+from . import manager as MG
 from . import images as IMG
 
 
@@ -61,6 +62,24 @@ CAPTIONS = {
     "waiver_roi":
         "Fantasy points per FAAB dollar, counting only pickups you actually paid for. "
         "Free-agent adds are listed separately since you can't overpay for free.",
+    "decision_value_chart":
+        "Points left on the bench, added up week by week. Flat is perfect; every "
+        "step down is a start/sit call that cost you. The slope matters more than "
+        "the number — a steady bleed is a habit, one cliff is a bad Sunday.",
+    "schedule_swap_chart":
+        "Every team's scores replayed against every other team's schedule. Read across "
+        "your row to see the record you'd have had with their fixtures. The dark "
+        "diagonal is what actually happened.",
+    "timing_chart":
+        "For each pickup: points per game in the 3 weeks before you added them vs. the "
+        "3 weeks after. Below the line means you bought production that had already "
+        "happened; above it means you got there first.",
+    "fingerprint_chart":
+        "Five-axis manager profile, scaled against your own league — so every axis "
+        "always has a 0 and a 100. It describes how someone plays, not how well.",
+    "draft_slope_chart":
+        "Where a player was drafted vs. where they finished in scoring. Bars to the "
+        "right beat their draft slot; bars to the left were reaches.",
     "luck_chart_season":
         "Points scored vs. luck — top-right got good results and earned them; "
         "bottom-right scored well but got unlucky.",
@@ -636,6 +655,8 @@ _GENERIC_CHARTS_JS = """
 Chart.register(ChartDataLabels);
 (function() {
   const NAVY = '#15243b', GREEN = '#19c37d', RED = '#c0392b', GRAY = '#9aa7bd';
+  const PALETTE = ['#15243b','#19c37d','#c0392b','#2e86c1','#e67e22','#8e44ad',
+                   '#16a085','#d4ac0d','#5d6d7e','#cb4335','#1abc9c','#7d3c98'];
   const shortLabel = (name) => name.length > 16 ? name.slice(0, 15) + '…' : name;
 
   (DOSSIER_DATA.scatterCharts || []).forEach(function(cfg) {
@@ -692,6 +713,100 @@ Chart.register(ChartDataLabels);
       }
     });
   });
+
+  (DOSSIER_DATA.lineCharts || []).forEach(function(cfg) {
+    // One line per manager. Deliberately no datalabels: twelve labelled
+    // series is unreadable, so the legend carries identity instead.
+    new Chart(document.getElementById(cfg.id), {
+      type: 'line',
+      data: {
+        labels: cfg.labels,
+        datasets: cfg.series.map(function(s, i) {
+          return { label: s.label, data: s.data, borderColor: PALETTE[i % PALETTE.length],
+                   backgroundColor: PALETTE[i % PALETTE.length], borderWidth: s.emphasis ? 3 : 1.5,
+                   pointRadius: 0, pointHoverRadius: 4, tension: 0.25, fill: false };
+        })
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, interaction: { mode: 'nearest', intersect: false },
+        plugins: {
+          legend: { display: true, position: 'bottom', labels: { boxWidth: 10, font: { size: 10 } } },
+          datalabels: { display: false },
+          tooltip: { callbacks: { label: (c) => c.dataset.label + ': ' + c.parsed.y.toFixed(1) } }
+        },
+        scales: {
+          x: { title: { display: true, text: cfg.xLabel } },
+          y: { title: { display: true, text: cfg.yLabel } }
+        }
+      }
+    });
+  });
+
+  (DOSSIER_DATA.matrixCharts || []).forEach(function(cfg) {
+    // Heatmap via the matrix controller. Colour runs red (few wins) through
+    // to green (many), scaled to the grid's own min/max so the contrast is
+    // always usable regardless of how many weeks have been played.
+    const vals = cfg.cells.map(c => c.v);
+    const lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+    const span = (hi - lo) || 1;
+    new Chart(document.getElementById(cfg.id), {
+      type: 'matrix',
+      data: {
+        datasets: [{
+          data: cfg.cells,
+          backgroundColor: function(ctx) {
+            const c = ctx.dataset.data[ctx.dataIndex];
+            if (!c) return '#fff';
+            const t = (c.v - lo) / span;
+            if (c.x === c.y) return 'rgba(21,36,59,0.92)';
+            return 'rgba(' + Math.round(192 - 167 * t) + ',' + Math.round(57 + 138 * t) + ',' +
+                   Math.round(43 + 82 * t) + ',0.82)';
+          },
+          borderColor: '#fff', borderWidth: 1,
+          width: (ctx) => (ctx.chart.chartArea || {}).width / cfg.xLabels.length - 2,
+          height: (ctx) => (ctx.chart.chartArea || {}).height / cfg.yLabels.length - 2
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          datalabels: {
+            display: true, color: '#fff', font: { size: 9, weight: 700 },
+            formatter: (v) => v.v
+          },
+          tooltip: { callbacks: { title: () => '', label: (c) => c.raw.tooltip || '' } }
+        },
+        scales: {
+          x: { type: 'category', labels: cfg.xLabels, offset: true,
+               title: { display: true, text: cfg.xLabel },
+               ticks: { font: { size: 9 }, maxRotation: 90, minRotation: 60 }, grid: { display: false } },
+          y: { type: 'category', labels: cfg.yLabels, offset: true, reverse: true,
+               title: { display: true, text: cfg.yLabel },
+               ticks: { font: { size: 9 } }, grid: { display: false } }
+        }
+      }
+    });
+  });
+
+  (DOSSIER_DATA.radarCharts || []).forEach(function(cfg) {
+    new Chart(document.getElementById(cfg.id), {
+      type: 'radar',
+      data: {
+        labels: cfg.axes,
+        datasets: [{ label: cfg.label, data: cfg.values,
+          borderColor: NAVY, backgroundColor: 'rgba(21,36,59,0.18)',
+          borderWidth: 2, pointRadius: 3, pointBackgroundColor: NAVY }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false }, datalabels: { display: false },
+                   tooltip: { callbacks: { label: (c) => c.label + ': ' + c.parsed.r } } },
+        scales: { r: { min: 0, max: 100, ticks: { display: false, stepSize: 25 },
+                       pointLabels: { font: { size: 9 } } } }
+      }
+    });
+  });
 })();
 """
 
@@ -716,6 +831,128 @@ def _bar_spec(chart_id, title, bars, x_label, x_range=None, color_by_sign=False,
         "colorBySign": color_by_sign, "bars": bars,
         "caption": CAPTIONS.get(caption_key, ""),
     }
+
+
+
+def _line_spec(chart_id, title, labels, series, x_label, y_label,
+               tall=False, caption_key=None) -> dict:
+    """series: [{"label": str, "data": [float,...], "emphasis": bool}]."""
+    return {
+        "id": chart_id, "title": title, "tall": tall, "kind": "line",
+        "labels": labels, "series": series,
+        "xLabel": x_label, "yLabel": y_label,
+        "caption": CAPTIONS.get(caption_key, ""),
+    }
+
+
+def _matrix_spec(chart_id, title, cells, x_labels, y_labels, x_label, y_label,
+                 tall=False, caption_key=None) -> dict:
+    """cells: [{"x": str, "y": str, "v": int, "tooltip": str}] — x/y are the
+    category labels themselves, which is what the matrix controller indexes on."""
+    return {
+        "id": chart_id, "title": title, "tall": tall, "kind": "matrix",
+        "cells": cells, "xLabels": x_labels, "yLabels": y_labels,
+        "xLabel": x_label, "yLabel": y_label,
+        "caption": CAPTIONS.get(caption_key, ""),
+    }
+
+
+def _radar_spec(chart_id, title, axes, values, label, caption_key=None) -> dict:
+    return {
+        "id": chart_id, "title": title, "tall": False, "kind": "radar",
+        "axes": axes, "values": values, "label": label,
+        "caption": CAPTIONS.get(caption_key, ""),
+    }
+
+
+def _manager_chart_specs(season, weeks: list, upto_week=None) -> list:
+    """Monthly manager charts: schedule-swap heatmap, transaction-timing
+    scatter, and a fingerprint radar for the month's standout manager.
+
+    These are monthly rather than weekly on purpose — the matrix barely
+    moves week to week once a season is underway, and transaction timing
+    needs a few weeks of after-data before a pickup can be scored at all.
+    """
+    specs = []
+    if not weeks:
+        return specs
+    last = upto_week if upto_week is not None else max(weeks)
+
+    matrix = MG.schedule_swap_matrix(season, upto_week=last)
+    if matrix and len(matrix) > 1:
+        labels = [_short_name(season.team_name(rid)) for rid in sorted(matrix)]
+        cells = []
+        for rid in sorted(matrix):
+            for sched_rid in sorted(matrix[rid]):
+                v = matrix[rid][sched_rid]
+                cells.append({
+                    "y": _short_name(season.team_name(rid)),
+                    "x": _short_name(season.team_name(sched_rid)),
+                    "v": v["wins"],
+                    "tooltip": (f"{season.team_name(rid)} on {season.team_name(sched_rid)}'s "
+                                f"schedule: {v['wins']}-{v['losses']}"
+                                + (f"-{v['ties']}" if v["ties"] else "")),
+                })
+        specs.append(_matrix_spec("scheduleSwapChart", "Schedule Swap: Wins Under Every Slate",
+                                  cells, labels, labels,
+                                  "…running this manager's schedule", "This team…",
+                                  tall=True, caption_key="schedule_swap_chart"))
+
+    timing = MG.transaction_timing(season, weeks, max_week=last)
+    if timing:
+        pts = []
+        for t in timing:
+            swing = t["after_ppg"] - t["before_ppg"]
+            pts.append({
+                "x": t["before_ppg"], "y": t["after_ppg"],
+                "label": t["player_name"], "good": swing > 0,
+                "tooltip": (f"{t['player_name']} — {season.team_name(t['roster_id'])} "
+                            f"wk{t['week']}: {t['before_ppg']:.1f} before, "
+                            f"{t['after_ppg']:.1f} after"),
+            })
+        hi = max([max(p["x"], p["y"]) for p in pts] + [1.0])
+        cap = round(hi * 1.1, 1)
+        specs.append(_scatter_spec("timingChart", "Pickup Timing: Before vs After",
+                                   pts, "Pts/game in 3 weeks before add",
+                                   "Pts/game in 3 weeks after add",
+                                   (0, cap), (0, cap), with_diagonal=True,
+                                   tall=True, caption_key="timing_chart"))
+
+    fp = MG.manager_fingerprint(season, weeks, upto_week=last)
+    if fp:
+        cdv = MG.cumulative_decision_value(season, upto_week=last)
+        if cdv:
+            star = max(cdv.items(), key=lambda kv: kv[1]["total"])[0]
+            if star in fp:
+                specs.append(_radar_spec(
+                    "fingerprintChart",
+                    f"Manager Fingerprint: {season.team_name(star)}",
+                    MG.FINGERPRINT_AXES,
+                    [fp[star][a] for a in MG.FINGERPRINT_AXES],
+                    season.team_name(star), caption_key="fingerprint_chart"))
+    return specs
+
+
+def _draft_chart_specs(season) -> list:
+    """Season-review chart: draft slot vs. finishing scoring rank.
+
+    Season-scoped by nature — draft capital is fixed in August and only
+    becomes judgeable once there is a full season to judge it against.
+    """
+    rows = MG.draft_slope(season, top_n=12)
+    if not rows:
+        return []
+    bars = [{"label": f"{r['player_name']} (#{r['pick_no']})", "value": r["slope"]}
+            for r in rows]
+    return [_bar_spec("draftSlopeChart", "Draft Slot vs Finish: Steals & Reaches",
+                      bars, "Places gained vs draft slot", color_by_sign=True,
+                      tall=True, caption_key="draft_slope_chart")]
+
+
+def _short_name(name: str, width: int = 14) -> str:
+    """Axis labels on a 12x12 grid have almost no room; trim rather than let
+    Chart.js overlap them."""
+    return name if len(name) <= width else name[: width - 1] + "\u2026"
 
 
 def _season_chart_specs(season, season_stats, month_stats, upto_week=None) -> list:
@@ -760,13 +997,15 @@ def _season_chart_specs(season, season_stats, month_stats, upto_week=None) -> li
     return specs
 
 
-def _weekly_chart_specs(season, week_stats: dict) -> list:
+def _weekly_chart_specs(season, week_stats: dict, week: int | None = None) -> list:
     """Weekly charts: this-week luck scatter (all-play% vs points scored,
     colored by whether the score beat the week's median — a single week's
     actual W/L is binary and the season chart's diagonal-line "fair" framing
     doesn't translate to one week, so median is the more useful colour
     signal here), points-vs-week-average bar, this week's efficiency bar —
-    the weekly-scoped analogues of the season/monthly charts."""
+    the weekly-scoped analogues of the season/monthly charts, plus the
+    cumulative decision-value line — the one chart the weekly cadence
+    actually builds rather than merely recomputes."""
     if not week_stats:
         return []
     scores = {rid: ws["score"] for rid, ws in week_stats.items()}
@@ -803,6 +1042,28 @@ def _weekly_chart_specs(season, week_stats: dict) -> list:
         specs.append(_bar_spec("efficiencyChart", "This Week's Lineup Efficiency", eff_bars,
                                "Lineup efficiency %", x_range=(0, 100),
                                caption_key="efficiency_chart"))
+
+    if week is not None:
+        cdv = MG.cumulative_decision_value(season, upto_week=week)
+        if cdv:
+            weeks_axis = sorted({w for v in cdv.values() for (w, _d, _c) in v["series"]})
+            # Emphasise the two extremes so a twelve-line chart still has a
+            # readable story rather than being a ball of spaghetti.
+            ranked = sorted(cdv.items(), key=lambda kv: kv[1]["total"])
+            emphasised = {ranked[0][0], ranked[-1][0]} if len(ranked) > 1 else set()
+            series = []
+            for rid, v in sorted(cdv.items(), key=lambda kv: kv[1]["total"]):
+                by_week = {w: c for (w, _d, c) in v["series"]}
+                series.append({
+                    "label": season.team_name(rid),
+                    "data": [by_week.get(w) for w in weeks_axis],
+                    "emphasis": rid in emphasised,
+                })
+            specs.append(_line_spec("decisionValueChart",
+                                    "Cumulative Cost of Start/Sit Decisions",
+                                    [f"Wk {w}" for w in weeks_axis], series,
+                                    "Week", "Cumulative points left on bench",
+                                    tall=True, caption_key="decision_value_chart"))
     return specs
 
 
@@ -816,15 +1077,24 @@ def _charts_html(specs: list) -> str:
         caption_html = f'<p class="caption">{html.escape(caption)}</p>' if caption else ""
         boxes.append(f'<div class="{cls}"><h3>{html.escape(spec["title"])}</h3>{caption_html}'
                      f'<div class="canvas-wrap"><canvas id="{spec["id"]}"></canvas></div></div>')
-    scatter = [s for s in specs if s["kind"] == "scatter"]
-    bar = [s for s in specs if s["kind"] == "bar"]
+    by_kind = {k: [s for s in specs if s["kind"] == k]
+               for k in ("scatter", "bar", "line", "matrix", "radar")}
     # Defang any "</script>" a malicious team name could smuggle into the JSON payload.
-    data_json = json.dumps({"scatterCharts": scatter, "barCharts": bar}).replace("</", "<\\/")
+    data_json = json.dumps({
+        "scatterCharts": by_kind["scatter"], "barCharts": by_kind["bar"],
+        "lineCharts": by_kind["line"], "matrixCharts": by_kind["matrix"],
+        "radarCharts": by_kind["radar"],
+    }).replace("</", "<\\/")
+    # The matrix controller is a separate plugin; only pay for it when a
+    # matrix chart is actually on the page.
+    matrix_js = ('<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-matrix@2"></script>'
+                 if by_kind["matrix"] else "")
     return f"""
   <h2>Charts</h2>
   <div class="charts-grid">{''.join(boxes)}</div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2"></script>
+  {matrix_js}
   <script>
     const DOSSIER_DATA = {data_json};
     {_GENERIC_CHARTS_JS}
@@ -1261,6 +1531,12 @@ def render_html(season, awards, roasts, period_label, season_stats=None,
     if weeks:
         deep_dive_html = _deep_dive_html(season, weeks, upto_week)
 
+    chart_specs = _season_chart_specs(season, season_stats, month_stats, upto_week)
+    chart_specs += _manager_chart_specs(season, weeks, upto_week)
+    if kind == "season":
+        chart_specs += _draft_chart_specs(season)
+    charts_html = _charts_html(chart_specs)
+
     month_html = ""
     if month_stats:
         rows = ""
@@ -1307,7 +1583,7 @@ def render_html(season, awards, roasts, period_label, season_stats=None,
   <h2 class="screen-only">{standings_heading}</h2>
   <table class="screen-only"><tr><th>#</th><th>Team</th><th>W-L</th><th>PF</th><th>PA</th><th>Form</th></tr>{st_rows}</table>
 
-  {_charts_html(_season_chart_specs(season, season_stats, month_stats, upto_week))}
+  {charts_html}
 
   <div class="screen-only">{power_rank_html}{luck_html}{median_html}</div>
   {deep_dive_html}
@@ -1318,7 +1594,7 @@ def render_html(season, awards, roasts, period_label, season_stats=None,
 
 
 def render_weekly_html(season, awards, roasts, period_label, week, rivalry_matchups=None, recap="",
-                       tier="normal") -> str:
+                       tier="normal", playoff_odds=None, pickup_odds_swing=None) -> str:
     fame = [a for a in awards if a.hall == "fame"]
     shame = [a for a in awards if a.hall == "shame"]
 
@@ -1350,7 +1626,27 @@ def render_weekly_html(season, awards, roasts, period_label, week, rivalry_match
     scores = S.weekly_scores(wd)
     pairs = S.matchup_pairs(wd)
     week_stats = S.week_report_stats(season, week)
-    charts_html = _charts_html(_weekly_chart_specs(season, week_stats))
+    charts_html = _charts_html(_weekly_chart_specs(season, week_stats, week=week))
+
+    # Season-to-date context in a single-week report. Playoff odds belong here
+    # more than anywhere: they move most in the week that moved them, and
+    # "your odds fell 14 points on Sunday" is a weekly sentence.
+    weekly_playoff_html = ""
+    if playoff_odds:
+        rows = "".join(f"<tr><td>{html.escape(season.team_name(rid))}</td>"
+                       f"<td class='num'>{odds * 100:.1f}%</td></tr>"
+                       for rid, odds in sorted(playoff_odds.items(),
+                                               key=lambda kv: kv[1], reverse=True))
+        swing_note = ""
+        if pickup_odds_swing is not None:
+            swing_note = (f"<p>This week's best waiver add was worth "
+                          f"<strong>{pickup_odds_swing:+.1f}%</strong> of playoff odds "
+                          f"to the team that made it.</p>")
+        weekly_playoff_html = (f"<h2>Playoff Odds (Monte Carlo, rest of regular season)</h2>"
+                               f"<table><tr><th>Team</th><th>Odds</th></tr>{rows}</table>"
+                               f"{swing_note}")
+
+    weekly_deep_dive_html = _deep_dive_html(season, list(range(1, week + 1)), week)
 
     no_matchup_html = "" if pairs else (
         '<div class="notice">No head-to-head matchups recorded for this week (likely outside '
@@ -1493,6 +1789,8 @@ def render_weekly_html(season, awards, roasts, period_label, week, rivalry_match
 
   {pdf_table}
   <div class="screen-only">{power_html}{luck_index_html}{median_html}</div>
+  {weekly_deep_dive_html}
+  {weekly_playoff_html}
   {charts_html}
   {rivalry_html}
 </div></body></html>"""

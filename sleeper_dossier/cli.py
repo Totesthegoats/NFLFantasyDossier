@@ -156,8 +156,11 @@ def main(argv=None):
         recap = commentary.get("recap", "")
         text = RND.render_weekly_text(season, awards, roasts, period_label=label, week=week,
                                       rivalry_matchups=rivalry_matchups, recap=recap)
+        playoff_odds, pickup_odds_swing = SIM.odds_for_report(season, week, [week])
         html_out = RND.render_weekly_html(season, awards, roasts, period_label=label, week=week,
-                                          rivalry_matchups=rivalry_matchups, recap=recap)
+                                          rivalry_matchups=rivalry_matchups, recap=recap,
+                                          playoff_odds=playoff_odds,
+                                          pickup_odds_swing=pickup_odds_swing)
     else:
         (yr, mo), weeks, buckets = _resolve_month(season, args.month)
         if not weeks:
@@ -182,14 +185,9 @@ def main(argv=None):
             season, kind="monthly", period=period, best=best, worst=worst,
             faab_totals=faab_totals, trades=trades)
 
-        # Monte Carlo playoff odds — bootstrapped rest-of-season projection,
-        # plus how much this period's best-value pickup moved its team's odds.
+        # Monte Carlo playoff odds + the best pickup's effect on them.
         upto_week = max(weeks)
-        schedule = D.remaining_schedule(season, upto_week, season.playoff_week_start - 1)
-        playoff_odds = SIM.simulate_playoff_odds(season, upto_week, schedule, season.playoff_teams)
-        por_pickup = W.best_por_period(season, weeks)
-        pickup_odds_swing = SIM.pickup_playoff_impact(
-            season, upto_week, schedule, season.playoff_teams, por_pickup) if por_pickup else None
+        playoff_odds, pickup_odds_swing = SIM.odds_for_report(season, upto_week, weeks)
 
         text = RND.render_text(season, awards, roasts, period_label=label,
                                season_stats=ss, kind="monthly", month_stats=ms, recap=recap,

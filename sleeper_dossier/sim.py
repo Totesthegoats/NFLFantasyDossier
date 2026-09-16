@@ -173,3 +173,33 @@ def pickup_playoff_impact(season, upto_week: int, schedule: dict, playoff_teams:
         score_pool_overrides={pickup.roster_id: list(counterfactual_scores.values())},
         base=counterfactual_base)
     return round((real[pickup.roster_id] - counterfactual[pickup.roster_id]) * 100, 1)
+
+
+def odds_for_report(season, upto_week: int, weeks: list):
+    """(playoff_odds, pickup_odds_swing) for a report covering `weeks` and
+    cut off at `upto_week`.
+
+    Both cli.py and batch.py need exactly this pair, and both the weekly and
+    monthly reports now want it — one helper rather than four copies of the
+    same five lines drifting apart.
+
+    Returns ({}, None) once the regular season is over: there is no remaining
+    schedule to simulate, so every team's odds are already decided and the
+    table would just print 100s and 0s.
+    """
+    from . import data as D
+    from . import waivers as W
+
+    last_regular = season.playoff_week_start - 1
+    if upto_week >= last_regular:
+        return {}, None
+
+    schedule = D.remaining_schedule(season, upto_week, last_regular)
+    odds = simulate_playoff_odds(season, upto_week, schedule, season.playoff_teams)
+    swing = None
+    if weeks:
+        por = W.best_por_period(season, weeks)
+        if por:
+            swing = pickup_playoff_impact(season, upto_week, schedule,
+                                          season.playoff_teams, por)
+    return odds, swing

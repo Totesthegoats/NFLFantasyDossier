@@ -95,8 +95,11 @@ def generate_one(league_id, month_arg=None, week_arg=None, do_season=False,
             week=week, rivalry_matchups=rivalry_matchups) if do_roast else {}
         roasts = commentary.get("roasts", {})
         recap = commentary.get("recap", "")
+        playoff_odds, pickup_odds_swing = SIM.odds_for_report(season, week, [week])
         html_out = RND.render_weekly_html(season, awards, roasts, period_label=label, week=week,
-                                          rivalry_matchups=rivalry_matchups, recap=recap, tier=tier)
+                                          rivalry_matchups=rivalry_matchups, recap=recap, tier=tier,
+                                          playoff_odds=playoff_odds,
+                                          pickup_odds_swing=pickup_odds_swing)
         pdf_out = PRND.render_pdf_weekly_html(
             season, awards, roasts, period_label=label, week=week,
             rivalry_matchups=rivalry_matchups, recap=recap,
@@ -162,14 +165,9 @@ def generate_one(league_id, month_arg=None, week_arg=None, do_season=False,
     waiver_take = R.write_waiver_take(season, kind="monthly", period=period, best=best, worst=worst,
                                       faab_totals=faab_totals, trades=trades) if do_roast else ""
 
-    # Monte Carlo playoff odds — bootstrapped rest-of-season projection,
-    # plus how much this period's best-value pickup moved its team's odds.
+    # Monte Carlo playoff odds + the best pickup's effect on them.
     upto_week = max(weeks)
-    schedule = D.remaining_schedule(season, upto_week, season.playoff_week_start - 1)
-    playoff_odds = SIM.simulate_playoff_odds(season, upto_week, schedule, season.playoff_teams)
-    por_pickup = W.best_por_period(season, weeks)
-    pickup_odds_swing = SIM.pickup_playoff_impact(
-        season, upto_week, schedule, season.playoff_teams, por_pickup) if por_pickup else None
+    playoff_odds, pickup_odds_swing = SIM.odds_for_report(season, upto_week, weeks)
 
     html_out = RND.render_html(season, awards, roasts, period_label=label,
                                season_stats=ss, kind="monthly", month_stats=ms, recap=recap,
