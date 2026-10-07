@@ -63,7 +63,8 @@ def cumulative_decision_value(season, upto_week: int | None = None) -> dict:
 # Schedule swap  (monthly report)
 # ──────────────────────────────────────────────────────────────────────────
 
-def schedule_swap_matrix(season, upto_week: int | None = None) -> dict:
+def schedule_swap_matrix(season, upto_week: int | None = None,
+                         weeks: list | None = None) -> dict:
     """{roster_id: {schedule_owner_rid: wins}} — every team's record replayed
     against every other team's slate.
 
@@ -75,8 +76,16 @@ def schedule_swap_matrix(season, upto_week: int | None = None) -> dict:
 
     A team scheduled against itself in some week is skipped for that week
     rather than auto-counted, so a bye-like artefact can't inflate a row.
+
+    `weeks` restricts the replay to exactly those weeks — the month-scoped
+    version, which is what a report asking "were this month's fixtures fair"
+    needs. `upto_week` alone means season-to-date.
     """
-    weeks = sorted(w for w in season.weeks if upto_week is None or w <= upto_week)
+    if weeks is not None:
+        weeks = sorted(w for w in weeks
+                       if w in season.weeks and (upto_week is None or w <= upto_week))
+    else:
+        weeks = sorted(w for w in season.weeks if upto_week is None or w <= upto_week)
 
     # week -> {rid: opponent_rid} and week -> {rid: points}
     opponents: dict = {}
