@@ -9,6 +9,7 @@ Both consume the same inputs so you can offer text now and HTML later.
 """
 
 from __future__ import annotations
+import os
 import html
 import json
 import statistics
@@ -16,6 +17,8 @@ import textwrap
 
 from . import stats as S
 from . import waivers as W
+from . import manager as MG
+from . import monthly as MTH
 from . import images as IMG
 
 
@@ -45,6 +48,40 @@ CAPTIONS = {
         "of consistency.",
     "rivalry_watch":
         "Head-to-head history between this week's opponents, including current streaks.",
+    "pythagorean":
+        "Expected wins from your own points for and against. Ahead of it means you've "
+        "converted your scoring into more wins than it should have bought; behind it "
+        "means the scoreboard owes you.",
+    "consistency":
+        "How much your weekly score swings, as a % of your average — so it's fair "
+        "between high and low scorers. Low = reliable floor, high = boom-or-bust.",
+    "optimal_record":
+        "The record everyone would have if BOTH sides started their best possible "
+        "lineup every week. The gap is what your bench decisions actually cost — or "
+        "saved — you.",
+    "clutch":
+        "Record in games decided by under 5 points. Small samples, big arguments.",
+    "waiver_roi":
+        "Fantasy points per FAAB dollar, counting only pickups you actually paid for. "
+        "Free-agent adds are listed separately since you can't overpay for free.",
+    "decision_value_chart":
+        "Points left on the bench, added up week by week. Flat is perfect; every "
+        "step down is a start/sit call that cost you. The slope matters more than "
+        "the number — a steady bleed is a habit, one cliff is a bad Sunday.",
+    "schedule_swap_chart":
+        "Every team's scores replayed against every other team's schedule. Read across "
+        "your row to see the record you'd have had with their fixtures. The dark "
+        "diagonal is what actually happened.",
+    "timing_chart":
+        "For each pickup: points per game in the 3 weeks before you added them vs. the "
+        "3 weeks after. Below the line means you bought production that had already "
+        "happened; above it means you got there first.",
+    "fingerprint_chart":
+        "Five-axis manager profile, scaled against your own league — so every axis "
+        "always has a 0 and a 100. It describes how someone plays, not how well.",
+    "draft_slope_chart":
+        "Where a player was drafted vs. where they finished in scoring. Bars to the "
+        "right beat their draft slot; bars to the left were reaches.",
     "luck_chart_season":
         "Points scored vs. luck — top-right got good results and earned them; "
         "bottom-right scored well but got unlucky.",
@@ -151,7 +188,8 @@ def _closest_game(season, weeks: list):
 # ----------------------------------------------------------------------
 
 def render_text(season, awards, roasts, period_label, season_stats=None,
-                kind="monthly", month_stats=None, recap="", waiver_take=""):
+                kind="monthly", month_stats=None, recap="", waiver_take="",
+                playoff_odds=None, pickup_odds_swing=None):
     L = []
     header = f"{season.name} — {period_label}"
     L.append("=" * 64)
@@ -209,6 +247,16 @@ def render_text(season, awards, roasts, period_label, season_stats=None,
         wl = f"{r['w']}-{r['l']}" + (f"-{r['ties']}" if r['ties'] else "")
         L.append(f"  {i:<3}{r['team'][:23]:<24}{wl:<8}{r['pf']:>8.1f}{r['pa']:>8.1f}")
 
+    # Monte Carlo playoff odds — Monte Carlo projection of the rest of the
+    # regular season, bootstrapped from each team's own scoring so far.
+    if playoff_odds:
+        L.append("\n" + "-" * 64)
+        L.append("  PLAYOFF ODDS  (Monte Carlo, rest of regular season)")
+        L.append("-" * 64)
+        ranked_odds = sorted(playoff_odds.items(), key=lambda kv: kv[1], reverse=True)
+        for rid, odds in ranked_odds:
+            L.append(f"  {season.team_name(rid)[:23]:<24}{odds * 100:>6.1f}%")
+
     # Team form (weekly score sparkline across the period)
     if weeks:
         L.append("\n" + "-" * 64)
@@ -251,6 +299,18 @@ def render_text(season, awards, roasts, period_label, season_stats=None,
                 top = sorted(faab_totals.items(), key=lambda kv: kv[1], reverse=True)[:3]
                 spend_str = ", ".join(f"{season.team_name(rid)} ${amt}" for rid, amt in top)
                 L.append(f"  Top FAAB spend: {spend_str}")
+            por = W.best_por_period(season, weeks)
+            if por:
+                swing = f", {pickup_odds_swing:+.1f}% playoff odds" if pickup_odds_swing is not None else ""
+                L.append(f"  Best value pickup (pts over replacement): {season.team_name(por.roster_id)}"
+                         f" added {por.player_name} ({por.position}) -> +{por.por:.1f} pts over a"
+                         f" replacement-level {por.position} over {por.games} games{swing}")
+            sharpe = W.sharpe_by_position(season, weeks)
+            if sharpe:
+                top_pos, s = max(sharpe.items(), key=lambda kv: kv[1]["avg_sharpe"])
+                L.append(f"  Most reliable position off the wire: {top_pos}"
+                         f" (avg Sharpe {s['avg_sharpe']:.2f} across {s['n']} pickups,"
+                         f" best: {s['best'].player_name} at {s['best'].sharpe:.2f})")
             if trades:
                 L.append(f"\n  Trades ({len(trades)}):")
                 for t in trades:
@@ -562,6 +622,33 @@ ul{margin:4px 0 12px;padding-left:20px;font-size:14px;line-height:1.6;}
 .rivalry-card .matchup{font-size:15px;font-weight:700;}
 .rivalry-card .matchup .winner{color:var(--green);}
 .rivalry-card .history{margin-top:6px;font-size:13px;color:#5b6b85;}
+
+/* --- Monthly narrative & structure ------------------------------------- */
+.section-head{margin:34px 0 10px;font-size:19px;font-style:italic;letter-spacing:-.3px;
+  text-transform:none;color:var(--navy);border-bottom:2px solid var(--navy);padding-bottom:6px;}
+.narrative{margin:18px 0 26px;}
+.narrative p{margin:10px 0;font-size:14.5px;line-height:1.65;}
+.narrative p.lead{font-size:16px;line-height:1.6;color:#2b3a55;}
+.verdict{background:var(--navy);color:#fff;border-radius:14px;padding:18px 22px;margin:16px 0;}
+.verdict-label{font-size:11px;text-transform:uppercase;letter-spacing:.14em;opacity:.75;}
+.verdict-name{font-size:26px;font-style:italic;letter-spacing:-.5px;margin:2px 0 8px;}
+.verdict-detail{font-size:13.5px;line-height:1.6;opacity:.92;}
+.contents{background:#fff;border:1px solid #e3e8f0;border-radius:14px;padding:16px 22px;margin:0 0 24px;}
+.contents h2{margin:0 0 8px;}
+.contents ol{margin:0;padding-left:20px;columns:2;font-size:13.5px;line-height:1.9;}
+.contents a{color:var(--navy);text-decoration:none;}
+.contents a:hover{text-decoration:underline;}
+.appendix-note{font-size:13px;color:#5b6a85;font-style:italic;margin:0 0 16px;max-width:70ch;}
+.appendix{border-top:1px dashed #c3ccdb;padding-top:4px;}
+@media print{
+  .section-head{break-after:avoid;page-break-after:avoid;}
+  .verdict{break-inside:avoid;page-break-inside:avoid;}
+  .narrative{break-inside:avoid;page-break-inside:avoid;}
+  table{break-inside:auto;}
+  tr{break-inside:avoid;page-break-inside:avoid;}
+  thead{display:table-header-group;}
+  h2,h3{break-after:avoid;page-break-after:avoid;}
+}
 @media screen{.print-only{display:none;}}
 @media print{
   body{-webkit-print-color-adjust:exact;print-color-adjust:exact;}
@@ -597,6 +684,8 @@ _GENERIC_CHARTS_JS = """
 Chart.register(ChartDataLabels);
 (function() {
   const NAVY = '#15243b', GREEN = '#19c37d', RED = '#c0392b', GRAY = '#9aa7bd';
+  const PALETTE = ['#15243b','#19c37d','#c0392b','#2e86c1','#e67e22','#8e44ad',
+                   '#16a085','#d4ac0d','#5d6d7e','#cb4335','#1abc9c','#7d3c98'];
   const shortLabel = (name) => name.length > 16 ? name.slice(0, 15) + '…' : name;
 
   (DOSSIER_DATA.scatterCharts || []).forEach(function(cfg) {
@@ -653,6 +742,100 @@ Chart.register(ChartDataLabels);
       }
     });
   });
+
+  (DOSSIER_DATA.lineCharts || []).forEach(function(cfg) {
+    // One line per manager. Deliberately no datalabels: twelve labelled
+    // series is unreadable, so the legend carries identity instead.
+    new Chart(document.getElementById(cfg.id), {
+      type: 'line',
+      data: {
+        labels: cfg.labels,
+        datasets: cfg.series.map(function(s, i) {
+          return { label: s.label, data: s.data, borderColor: PALETTE[i % PALETTE.length],
+                   backgroundColor: PALETTE[i % PALETTE.length], borderWidth: s.emphasis ? 3 : 1.5,
+                   pointRadius: 0, pointHoverRadius: 4, tension: 0.25, fill: false };
+        })
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, interaction: { mode: 'nearest', intersect: false },
+        plugins: {
+          legend: { display: true, position: 'bottom', labels: { boxWidth: 10, font: { size: 10 } } },
+          datalabels: { display: false },
+          tooltip: { callbacks: { label: (c) => c.dataset.label + ': ' + c.parsed.y.toFixed(1) } }
+        },
+        scales: {
+          x: { title: { display: true, text: cfg.xLabel } },
+          y: { title: { display: true, text: cfg.yLabel } }
+        }
+      }
+    });
+  });
+
+  (DOSSIER_DATA.matrixCharts || []).forEach(function(cfg) {
+    // Heatmap via the matrix controller. Colour runs red (few wins) through
+    // to green (many), scaled to the grid's own min/max so the contrast is
+    // always usable regardless of how many weeks have been played.
+    const vals = cfg.cells.map(c => c.v);
+    const lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+    const span = (hi - lo) || 1;
+    new Chart(document.getElementById(cfg.id), {
+      type: 'matrix',
+      data: {
+        datasets: [{
+          data: cfg.cells,
+          backgroundColor: function(ctx) {
+            const c = ctx.dataset.data[ctx.dataIndex];
+            if (!c) return '#fff';
+            const t = (c.v - lo) / span;
+            if (c.x === c.y) return 'rgba(21,36,59,0.92)';
+            return 'rgba(' + Math.round(192 - 167 * t) + ',' + Math.round(57 + 138 * t) + ',' +
+                   Math.round(43 + 82 * t) + ',0.82)';
+          },
+          borderColor: '#fff', borderWidth: 1,
+          width: (ctx) => (ctx.chart.chartArea || {}).width / cfg.xLabels.length - 2,
+          height: (ctx) => (ctx.chart.chartArea || {}).height / cfg.yLabels.length - 2
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          datalabels: {
+            display: true, color: '#fff', font: { size: 9, weight: 700 },
+            formatter: (v) => v.v
+          },
+          tooltip: { callbacks: { title: () => '', label: (c) => c.raw.tooltip || '' } }
+        },
+        scales: {
+          x: { type: 'category', labels: cfg.xLabels, offset: true,
+               title: { display: true, text: cfg.xLabel },
+               ticks: { font: { size: 9 }, maxRotation: 90, minRotation: 60 }, grid: { display: false } },
+          y: { type: 'category', labels: cfg.yLabels, offset: true, reverse: true,
+               title: { display: true, text: cfg.yLabel },
+               ticks: { font: { size: 9 } }, grid: { display: false } }
+        }
+      }
+    });
+  });
+
+  (DOSSIER_DATA.radarCharts || []).forEach(function(cfg) {
+    new Chart(document.getElementById(cfg.id), {
+      type: 'radar',
+      data: {
+        labels: cfg.axes,
+        datasets: [{ label: cfg.label, data: cfg.values,
+          borderColor: NAVY, backgroundColor: 'rgba(21,36,59,0.18)',
+          borderWidth: 2, pointRadius: 3, pointBackgroundColor: NAVY }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false }, datalabels: { display: false },
+                   tooltip: { callbacks: { label: (c) => c.label + ': ' + c.parsed.r } } },
+        scales: { r: { min: 0, max: 100, ticks: { display: false, stepSize: 25 },
+                       pointLabels: { font: { size: 9 } } } }
+      }
+    });
+  });
 })();
 """
 
@@ -677,6 +860,137 @@ def _bar_spec(chart_id, title, bars, x_label, x_range=None, color_by_sign=False,
         "colorBySign": color_by_sign, "bars": bars,
         "caption": CAPTIONS.get(caption_key, ""),
     }
+
+
+
+def _line_spec(chart_id, title, labels, series, x_label, y_label,
+               tall=False, caption_key=None) -> dict:
+    """series: [{"label": str, "data": [float,...], "emphasis": bool}]."""
+    return {
+        "id": chart_id, "title": title, "tall": tall, "kind": "line",
+        "labels": labels, "series": series,
+        "xLabel": x_label, "yLabel": y_label,
+        "caption": CAPTIONS.get(caption_key, ""),
+    }
+
+
+def _matrix_spec(chart_id, title, cells, x_labels, y_labels, x_label, y_label,
+                 tall=False, caption_key=None) -> dict:
+    """cells: [{"x": str, "y": str, "v": int, "tooltip": str}] — x/y are the
+    category labels themselves, which is what the matrix controller indexes on."""
+    return {
+        "id": chart_id, "title": title, "tall": tall, "kind": "matrix",
+        "cells": cells, "xLabels": x_labels, "yLabels": y_labels,
+        "xLabel": x_label, "yLabel": y_label,
+        "caption": CAPTIONS.get(caption_key, ""),
+    }
+
+
+def _radar_spec(chart_id, title, axes, values, label, caption_key=None) -> dict:
+    return {
+        "id": chart_id, "title": title, "tall": False, "kind": "radar",
+        "axes": axes, "values": values, "label": label,
+        "caption": CAPTIONS.get(caption_key, ""),
+    }
+
+
+def _manager_chart_specs(season, weeks: list, upto_week=None) -> list:
+    """Monthly manager charts: schedule-swap heatmap, transaction-timing
+    scatter, and a fingerprint radar for the month's standout manager.
+
+    These are monthly rather than weekly on purpose — the matrix barely
+    moves week to week once a season is underway, and transaction timing
+    needs a few weeks of after-data before a pickup can be scored at all.
+    """
+    specs = []
+    if not weeks:
+        return specs
+    last = upto_week if upto_week is not None else max(weeks)
+    played = _weeks_played(season, last)
+
+    matrix = (MG.schedule_swap_matrix(season, upto_week=last)
+              if played >= _MIN_WEEKS_SCHEDULE else {})
+    if matrix and len(matrix) > 1:
+        labels = [_short_name(season.team_name(rid)) for rid in sorted(matrix)]
+        cells = []
+        for rid in sorted(matrix):
+            for sched_rid in sorted(matrix[rid]):
+                v = matrix[rid][sched_rid]
+                cells.append({
+                    "y": _short_name(season.team_name(rid)),
+                    "x": _short_name(season.team_name(sched_rid)),
+                    "v": v["wins"],
+                    "tooltip": (f"{season.team_name(rid)} on {season.team_name(sched_rid)}'s "
+                                f"schedule: {v['wins']}-{v['losses']}"
+                                + (f"-{v['ties']}" if v["ties"] else "")),
+                })
+        specs.append(_matrix_spec("scheduleSwapChart", "Schedule Swap: Wins Under Every Slate",
+                                  cells, labels, labels,
+                                  "…running this manager's schedule", "This team…",
+                                  tall=True, caption_key="schedule_swap_chart"))
+
+    timing = MG.transaction_timing(season, weeks, max_week=last)
+    if timing:
+        # Every point gets a name label, so plotting all of them (a month of
+        # streamer defenses lands in one pile at x=0) makes the chart
+        # unreadable. Keep the most extreme movers in both directions —
+        # they are the ones the chart is about.
+        timing = sorted(timing, key=lambda t: abs(t["after_ppg"] - t["before_ppg"]),
+                        reverse=True)[:12]
+        pts = []
+        for t in timing:
+            swing = t["after_ppg"] - t["before_ppg"]
+            pts.append({
+                "x": t["before_ppg"], "y": t["after_ppg"],
+                "label": t["player_name"], "good": swing > 0,
+                "tooltip": (f"{t['player_name']} — {season.team_name(t['roster_id'])} "
+                            f"wk{t['week']}: {t['before_ppg']:.1f} before, "
+                            f"{t['after_ppg']:.1f} after"),
+            })
+        hi = max([max(p["x"], p["y"]) for p in pts] + [1.0])
+        cap = round(hi * 1.1, 1)
+        specs.append(_scatter_spec("timingChart", "Pickup Timing: Before vs After",
+                                   pts, "Pts/game in 3 weeks before add",
+                                   "Pts/game in 3 weeks after add",
+                                   (0, cap), (0, cap), with_diagonal=True,
+                                   tall=True, caption_key="timing_chart"))
+
+    fp = (MG.manager_fingerprint(season, weeks, upto_week=last)
+          if played >= _MIN_WEEKS_FINGERPRINT else {})
+    if fp:
+        cdv = MG.cumulative_decision_value(season, upto_week=last)
+        if cdv:
+            star = max(cdv.items(), key=lambda kv: kv[1]["total"])[0]
+            if star in fp:
+                specs.append(_radar_spec(
+                    "fingerprintChart",
+                    f"Manager Fingerprint: {season.team_name(star)}",
+                    MG.FINGERPRINT_AXES,
+                    [fp[star][a] for a in MG.FINGERPRINT_AXES],
+                    season.team_name(star), caption_key="fingerprint_chart"))
+    return specs
+
+
+def _draft_chart_specs(season) -> list:
+    """Season-review chart: draft slot vs. finishing scoring rank.
+
+    Season-scoped by nature — draft capital is fixed in August and only
+    becomes judgeable once there is a full season to judge it against.
+    """
+    rows = MG.draft_slope(season, top_n=12)
+    if not rows:
+        return []
+    bars = [{"label": f"{r['player_name']} (#{r['pick_no']})", "value": r["slope"]}
+            for r in rows]
+    return [_bar_spec("draftSlopeChart", "Draft Slot vs Finish: Steals & Reaches",
+                      bars, "Places gained vs draft slot", color_by_sign=True,
+                      tall=True, caption_key="draft_slope_chart")]
+
+
+def _short_name(name: str, width: int = 14) -> str:
+    """Axis labels on a 12x12 grid have almost no room; trim rather than let
+    Chart.js overlap them."""
+    return name if len(name) <= width else name[: width - 1] + "\u2026"
 
 
 def _season_chart_specs(season, season_stats, month_stats, upto_week=None) -> list:
@@ -721,13 +1035,46 @@ def _season_chart_specs(season, season_stats, month_stats, upto_week=None) -> li
     return specs
 
 
-def _weekly_chart_specs(season, week_stats: dict) -> list:
+def _weekly_appendix_chart_specs(season, week: int | None) -> list:
+    """Weekly appendix chart: cumulative decision value.
+
+    Kept out of _weekly_chart_specs so the established weekly charts and the
+    newer appendix ones can be rendered into separate blocks.
+    """
+    specs = []
+    if week is not None and _weeks_played(season, week) >= _MIN_WEEKS_DECISION_CHART:
+        cdv = MG.cumulative_decision_value(season, upto_week=week)
+        if cdv:
+            weeks_axis = sorted({w for v in cdv.values() for (w, _d, _c) in v["series"]})
+            # Emphasise the two extremes so a twelve-line chart still has a
+            # readable story rather than being a ball of spaghetti.
+            ranked = sorted(cdv.items(), key=lambda kv: kv[1]["total"])
+            emphasised = {ranked[0][0], ranked[-1][0]} if len(ranked) > 1 else set()
+            series = []
+            for rid, v in sorted(cdv.items(), key=lambda kv: kv[1]["total"]):
+                by_week = {w: c for (w, _d, c) in v["series"]}
+                series.append({
+                    "label": season.team_name(rid),
+                    "data": [by_week.get(w) for w in weeks_axis],
+                    "emphasis": rid in emphasised,
+                })
+            specs.append(_line_spec("decisionValueChart",
+                                    "Cumulative Cost of Start/Sit Decisions",
+                                    [f"Wk {w}" for w in weeks_axis], series,
+                                    "Week", "Cumulative points left on bench",
+                                    tall=True, caption_key="decision_value_chart"))
+    return specs
+
+
+def _weekly_chart_specs(season, week_stats: dict, week: int | None = None) -> list:
     """Weekly charts: this-week luck scatter (all-play% vs points scored,
     colored by whether the score beat the week's median — a single week's
     actual W/L is binary and the season chart's diagonal-line "fair" framing
     doesn't translate to one week, so median is the more useful colour
     signal here), points-vs-week-average bar, this week's efficiency bar —
-    the weekly-scoped analogues of the season/monthly charts."""
+    the weekly-scoped analogues of the season/monthly charts, plus the
+    cumulative decision-value line — the one chart the weekly cadence
+    actually builds rather than merely recomputes."""
     if not week_stats:
         return []
     scores = {rid: ws["score"] for rid, ws in week_stats.items()}
@@ -764,10 +1111,26 @@ def _weekly_chart_specs(season, week_stats: dict) -> list:
         specs.append(_bar_spec("efficiencyChart", "This Week's Lineup Efficiency", eff_bars,
                                "Lineup efficiency %", x_range=(0, 100),
                                caption_key="efficiency_chart"))
+
     return specs
 
 
-def _charts_html(specs: list) -> str:
+
+
+def _charts_html(specs: list, heading: str = "Charts", var_name: str = "CHART_DATA_MAIN",
+                 include_libs: bool = True) -> str:
+    """Render a block of charts.
+
+    Callable more than once per page (main report + appendix), which is why
+    the data global is named per call and the CDN tags are optional — a
+    second block that re-declared `const DOSSIER_DATA` would throw and take
+    every chart on the page down with it.
+
+    `var_name` must never itself be "DOSSIER_DATA": the engine aliases it to
+    that name inside its own scope, so a matching outer name makes the alias
+    self-referential and dies in the temporal dead zone.
+    """
+    assert var_name != "DOSSIER_DATA", "var_name collides with the engine's internal alias"
     if not specs:
         return ""
     boxes = []
@@ -777,18 +1140,30 @@ def _charts_html(specs: list) -> str:
         caption_html = f'<p class="caption">{html.escape(caption)}</p>' if caption else ""
         boxes.append(f'<div class="{cls}"><h3>{html.escape(spec["title"])}</h3>{caption_html}'
                      f'<div class="canvas-wrap"><canvas id="{spec["id"]}"></canvas></div></div>')
-    scatter = [s for s in specs if s["kind"] == "scatter"]
-    bar = [s for s in specs if s["kind"] == "bar"]
+    by_kind = {k: [s for s in specs if s["kind"] == k]
+               for k in ("scatter", "bar", "line", "matrix", "radar")}
     # Defang any "</script>" a malicious team name could smuggle into the JSON payload.
-    data_json = json.dumps({"scatterCharts": scatter, "barCharts": bar}).replace("</", "<\\/")
+    data_json = json.dumps({
+        "scatterCharts": by_kind["scatter"], "barCharts": by_kind["bar"],
+        "lineCharts": by_kind["line"], "matrixCharts": by_kind["matrix"],
+        "radarCharts": by_kind["radar"],
+    }).replace("</", "<\\/")
+    libs = ""
+    if include_libs:
+        libs = ('<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>'
+                '<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2"></script>')
+    # The matrix controller is a separate plugin; only pay for it when a
+    # matrix chart is actually on the page.
+    if by_kind["matrix"]:
+        libs += '<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-matrix@2"></script>'
+    heading_html = f"<h2>{html.escape(heading)}</h2>" if heading else ""
     return f"""
-  <h2>Charts</h2>
+  {heading_html}
   <div class="charts-grid">{''.join(boxes)}</div>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2"></script>
+  {libs}
   <script>
-    const DOSSIER_DATA = {data_json};
-    {_GENERIC_CHARTS_JS}
+    const {var_name} = {data_json};
+    (function() {{ const DOSSIER_DATA = {var_name}; {_GENERIC_CHARTS_JS} }})();
   </script>
 """
 
@@ -941,8 +1316,270 @@ def _card(season, a, roasts):
       </div></div>"""
 
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Monthly narrative — the report's opening argument
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _ordinal(n) -> str:
+    """1 -> 1st. "up 5 to 5" reads as a score; "up 5 to 5th" reads as a rank."""
+    if n is None:
+        return "—"
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Minimum data before the appendix analytics are worth showing
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Every one of these is a season-to-date measure, and each is actively
+# misleading on one or two weeks of data rather than merely imprecise:
+# Pythagorean expectation on a single game returns 0.5 expected wins for
+# everyone; the consistency CV is exactly 0% because one score has no
+# deviation; clutch record is 0-0; the schedule-swap grid is near-identical
+# for every team because there is only one fixture to permute; and a
+# cumulative line chart with a single x-value draws literally nothing.
+#
+# So they are hidden rather than shown empty. A reader who sees "Exp W 0.5"
+# for all twelve teams learns nothing and trusts the rest of the page less.
+
+# Set SLEEPER_SHOW_APPENDIX=1 to bypass every gate below and render the
+# appendix whatever the data looks like. For previewing the sections during
+# development — the numbers really are meaningless this early, which is the
+# whole reason the gates exist, so this is not meant for a subscriber build.
+_FORCE_APPENDIX = os.environ.get("SLEEPER_SHOW_APPENDIX", "").strip() not in ("", "0", "false")
+
+_MIN_WEEKS_DEEP_DIVE = 4        # Pythagorean / CV / optimal record / clutch
+_MIN_WEEKS_SCHEDULE = 4         # swap matrix and schedule luck
+_MIN_WEEKS_DECISION_CHART = 3   # cumulative decision value needs a slope to read
+_MIN_WEEKS_FINGERPRINT = 4      # radar axes jitter wildly before this
+_MIN_WEEKS_PLAYOFF_ODDS = 4     # below this every team bootstraps the same league pool
+
+
+def _weeks_played(season, upto_week=None) -> int:
+    """How many weeks of real results exist up to `upto_week`.
+
+    Returns a deliberately huge number when _FORCE_APPENDIX is set, so every
+    `played >= _MIN_...` gate passes without each call site needing its own
+    override branch.
+    """
+    if _FORCE_APPENDIX:
+        return 10_000
+    return len([w for w in season.weeks
+                if upto_week is None or w <= upto_week])
+
+
+def _appendix_html(blocks: list) -> str:
+    """Wrap newly-added analytics in a clearly-labelled appendix.
+
+    These sections are being trialled rather than promoted into the report
+    proper, so they sit behind one heading at the end where a reader can
+    ignore them wholesale — and where removing them again is a one-line
+    change rather than an unpicking job.
+    """
+    body = "".join(b for b in blocks if b)
+    if not body.strip():
+        return ""
+    return (f'<h2 class="section-head page-start" id="sec-appendix">Appendix: New Analytics</h2>'
+            f'<p class="appendix-note">These sections are new and still being trialled. '
+            f'They sit outside the main report while we work out which of them earn a '
+            f'permanent place in it.</p>'
+            f'<section class="appendix">{body}</section>')
+
+
+def _contents_html(sections: list) -> str:
+    """Screen-only table of contents.
+
+    Print gets page breaks and running section heads instead — a list of
+    unclickable links is dead weight on paper, and the PDF reader already
+    has a page thumbnail rail.
+    """
+    if not sections:
+        return ""
+    items = "".join(
+        f'<li><a href="#{sid}">{html.escape(label)}</a></li>' for sid, label in sections)
+    return f'<nav class="contents screen-only"><h2>In This Issue</h2><ol>{items}</ol></nav>'
+
+
+def _month_narrative_html(season, ms: dict, prev_ms=None, period_label="") -> str:
+    """The lead section of the monthly report: what kind of month it was, who
+    won it, who moved, and what changed since the last issue.
+
+    A monthly report that opens with a standings table makes the reader do
+    the work of finding the story. This states it up front and leaves the
+    tables as evidence rather than as the argument.
+    """
+    if not ms:
+        return ""
+
+    shape = MTH.month_shape(ms)
+    verdict = MTH.manager_of_the_month(ms)
+    mv = MTH.movers(ms)
+    mom = MTH.month_over_month(ms, prev_ms)
+
+    parts = []
+
+    if shape:
+        settled = ("The table barely moved" if shape.get("settled")
+                   else f"{shape['total_places_moved']} places changed hands")
+        parts.append(
+            f'<p class="lead">{shape["weeks"]} weeks. Teams averaged '
+            f'<strong>{shape["avg_total"]:.0f}</strong> points across the month, from '
+            f'{shape["low_total"]:.0f} up to {shape["high_total"]:.0f} — a '
+            f'{shape["spread"]:.0f}-point spread, at {shape["avg_efficiency"]:.0f}% '
+            f'average lineup efficiency. {settled}.</p>')
+
+    if verdict:
+        runner = (f" — {verdict.margin:.1f} points clear of "
+                  f"{html.escape(season.team_name(verdict.runner_up_rid))}"
+                  if verdict.runner_up_rid else "")
+        climb = ""
+        if verdict.climb > 0:
+            climb = f" and climbed {verdict.climb} place{'s' if verdict.climb != 1 else ''}"
+        elif verdict.climb < 0:
+            climb = f" despite slipping {abs(verdict.climb)} place{'s' if verdict.climb != -1 else ''}"
+        parts.append(
+            f'<div class="verdict"><div class="verdict-label">Manager of the Month</div>'
+            f'<div class="verdict-name">{html.escape(season.team_name(verdict.roster_id))}</div>'
+            f'<div class="verdict-detail">Went <strong>{verdict.record}</strong> for '
+            f'<strong>{verdict.total_points:.1f}</strong> points '
+            f'({verdict.pts_above_avg:+.1f} vs the league average){climb}{runner}. '
+            f'Started {verdict.avg_efficiency:.0f}% of their available points.</div></div>')
+
+    move_bits = []
+    if mv["risers"]:
+        r = mv["risers"][0]
+        move_bits.append(f'<strong>Riser:</strong> {html.escape(season.team_name(r.roster_id))} '
+                         f'up {r.climb} to {_ordinal(r.rank_end)}')
+    if mv["fallers"]:
+        f_ = mv["fallers"][0]
+        move_bits.append(f'<strong>Faller:</strong> {html.escape(season.team_name(f_.roster_id))} '
+                         f'down {abs(f_.climb)} to {_ordinal(f_.rank_end)}')
+    if move_bits:
+        parts.append(f'<p>{" &nbsp;·&nbsp; ".join(move_bits)}</p>')
+
+    if mom:
+        gain = max(mom.items(), key=lambda kv: kv[1]["points_delta"])
+        drop = min(mom.items(), key=lambda kv: kv[1]["points_delta"])
+        if gain[1]["points_delta"] > 0:
+            parts.append(
+                f'<p><strong>Since last month:</strong> '
+                f'{html.escape(season.team_name(gain[0]))} scored '
+                f'{gain[1]["points_delta"]:+.0f} points more than they did last month; '
+                f'{html.escape(season.team_name(drop[0]))} scored '
+                f'{drop[1]["points_delta"]:+.0f}.</p>')
+
+    if not parts:
+        return ""
+    heading = html.escape(period_label) if period_label else "The Month"
+    return (f'<section class="narrative"><h2 class="section-head">{heading}: '
+            f'What Happened</h2>{"".join(parts)}</section>')
+
+
+def _deep_dive_html(season, weeks: list, upto_week=None) -> str:
+    """The Deep Dive section: Pythagorean expectation, scoring volatility,
+    optimal-lineup record, close-game record, and waiver ROI.
+
+    Each is a season-to-date measure, so it's built from `upto_week` (the
+    report's cutoff) rather than live team totals — a retrospective monthly
+    report must not leak later weeks' results.
+    """
+    last_week = upto_week if upto_week is not None else max(weeks)
+    if _weeks_played(season, last_week) < _MIN_WEEKS_DEEP_DIVE:
+        return ""
+
+    py = S.pythagorean(season, upto_week=last_week)
+    cons = S.consistency(season, upto_week=last_week)
+    opt = S.optimal_record(season, upto_week=last_week)
+    strk = S.streaks(season, upto_week=last_week)
+    clutch = S.clutch_record(season, upto_week=last_week)
+    if not py:
+        return ""
+
+    rows = ""
+    for rid, p in sorted(py.items(), key=lambda kv: kv[1]["delta"], reverse=True):
+        c = cons.get(rid, {})
+        o = opt.get(rid, {})
+        st = strk.get(rid, {})
+        cl = clutch.get(rid, {})
+        d_cls = "lucky" if p["delta"] > 0 else ("robbed" if p["delta"] < 0 else "")
+        o_delta = o.get("delta", 0)
+        o_cls = "robbed" if o_delta > 0 else ("lucky" if o_delta < 0 else "")
+        opt_cell = (f"{o.get('wins', 0)}-{o.get('losses', 0)}"
+                    f" <span class='{o_cls}'>({o_delta:+d})</span>") if o else "—"
+        streak_cell = (f"{st['current']}{st['current_kind']}"
+                       if st.get("current") else "—")
+        clutch_cell = f"{cl['wins']}-{cl['losses']}" if cl else "—"
+        rows += (f"<tr><td>{html.escape(season.team_name(rid))}</td>"
+                 f"<td class='num'>{p['expected_wins']:.1f}</td>"
+                 f"<td class='num {d_cls}'>{p['delta']:+.1f}</td>"
+                 f"<td class='num'>{opt_cell}</td>"
+                 f"<td class='num'>{c.get('cv', 0):.0f}%</td>"
+                 f"<td class='num'>{c.get('floor', 0):.0f}–{c.get('ceiling', 0):.0f}</td>"
+                 f"<td class='num'>{clutch_cell}</td>"
+                 f"<td class='num'>{streak_cell}</td></tr>")
+
+    table = f"""<table><tr><th>Team</th><th>Exp W</th><th>vs Exp</th><th>Optimal</th>
+      <th>Swing</th><th>Floor–Ceiling</th><th>Close</th><th>Streak</th></tr>{rows}</table>"""
+
+    bits = []
+    biggest = max(opt.items(), key=lambda kv: kv[1]["delta"], default=None)
+    if biggest and biggest[1]["delta"] > 0:
+        rid, o = biggest
+        bits.append(f"<p><strong>Most wins left on the bench:</strong> "
+                    f"{html.escape(season.team_name(rid))} — {o['actual_wins']}-{o['actual_losses']} "
+                    f"actual, but {o['wins']}-{o['losses']} if they'd started their best lineup "
+                    f"every week ({o['delta']:+d}).</p>")
+    if cons:
+        swingiest = max(cons.items(), key=lambda kv: kv[1]["cv"])
+        steadiest = min(cons.items(), key=lambda kv: kv[1]["cv"])
+        bits.append(f"<p><strong>Boom or bust:</strong> "
+                    f"{html.escape(season.team_name(swingiest[0]))} "
+                    f"({swingiest[1]['cv']:.0f}% swing, {swingiest[1]['floor']:.0f}–"
+                    f"{swingiest[1]['ceiling']:.0f}) &nbsp;·&nbsp; "
+                    f"<strong>Metronome:</strong> "
+                    f"{html.escape(season.team_name(steadiest[0]))} "
+                    f"({steadiest[1]['cv']:.0f}%).</p>")
+    longest = max(strk.items(), key=lambda kv: kv[1]["longest_win"], default=None)
+    if longest and longest[1]["longest_win"] >= 3:
+        bits.append(f"<p><strong>Longest win streak:</strong> "
+                    f"{html.escape(season.team_name(longest[0]))} — "
+                    f"{longest[1]['longest_win']} straight.</p>")
+
+    roi_html = ""
+    roi = W.waiver_roi(season, weeks)
+    paid = {rid: v for rid, v in roi.items() if v["roi"] is not None}
+    if paid:
+        roi_rows = ""
+        for rid, v in sorted(paid.items(), key=lambda kv: kv[1]["roi"], reverse=True):
+            free = (f"{v['free_adds']} free (+{v['free_points']:.0f})"
+                    if v["free_adds"] else "—")
+            roi_rows += (f"<tr><td>{html.escape(season.team_name(rid))}</td>"
+                         f"<td class='num'>${v['faab']}</td>"
+                         f"<td class='num'>{v['points']:.1f}</td>"
+                         f"<td class='num'>{v['roi']:.2f}</td>"
+                         f"<td class='num'>{free}</td></tr>")
+        roi_html = f"""<h2>Waiver ROI — Points per FAAB Dollar</h2>
+          {_caption_html("waiver_roi")}
+          <table><tr><th>Team</th><th>Spent</th><th>Points</th><th>Pts/$</th>
+          <th>Free adds</th></tr>{roi_rows}</table>"""
+
+    return f"""<h2>Deep Dive</h2>
+      {_caption_html("pythagorean")}
+      {table}
+      {''.join(bits)}
+      {roi_html}"""
+
+
 def render_html(season, awards, roasts, period_label, season_stats=None,
-                kind="monthly", month_stats=None, recap="", waiver_take="", tier="normal"):
+                kind="monthly", month_stats=None, recap="", waiver_take="", tier="normal",
+                playoff_odds=None, pickup_odds_swing=None, prev_month_stats=None):
     fame = [a for a in awards if a.hall == "fame"]
     shame = [a for a in awards if a.hall == "shame"]
     title = period_label
@@ -999,6 +1636,14 @@ def render_html(season, awards, roasts, period_label, season_stats=None,
                         f'{html.escape(season.team_name(loser))} by just {margin:.1f} '
                         f'({hi:.1f}–{lo:.1f})</div>')
 
+    playoff_html = ""
+    if playoff_odds:
+        rows = "".join(f"<tr><td>{html.escape(season.team_name(rid))}</td>"
+                       f"<td class='num'>{odds * 100:.1f}%</td></tr>"
+                       for rid, odds in sorted(playoff_odds.items(), key=lambda kv: kv[1], reverse=True))
+        playoff_html = (f"<h2>Playoff Odds (Monte Carlo, rest of regular season)</h2>"
+                        f"<table><tr><th>Team</th><th>Odds</th></tr>{rows}</table>")
+
     waiver_html = ""
     if weeks:
         best = W.best_pickup_period(season, weeks)
@@ -1018,6 +1663,20 @@ def render_html(season, awards, roasts, period_label, season_stats=None,
                 top = sorted(faab_totals.items(), key=lambda kv: kv[1], reverse=True)[:3]
                 spend_str = ", ".join(f"{html.escape(season.team_name(rid))} (${amt})" for rid, amt in top)
                 bits.append(f"<p><strong>Top FAAB spend:</strong> {spend_str}</p>")
+            por = W.best_por_period(season, weeks)
+            if por:
+                swing = f", {pickup_odds_swing:+.1f}% playoff odds" if pickup_odds_swing is not None else ""
+                bits.append(f'<p><strong>Best value pickup (pts over replacement):</strong> '
+                           f'{html.escape(season.team_name(por.roster_id))} added '
+                           f'{html.escape(por.player_name)} ({html.escape(por.position or "?")}) '
+                           f'&rarr; +{por.por:.1f} pts over a replacement-level {html.escape(por.position or "?")} '
+                           f'over {por.games} games{html.escape(swing)}</p>')
+            sharpe = W.sharpe_by_position(season, weeks)
+            if sharpe:
+                top_pos, s = max(sharpe.items(), key=lambda kv: kv[1]["avg_sharpe"])
+                bits.append(f'<p><strong>Most reliable position off the wire:</strong> '
+                           f'{html.escape(top_pos)} (avg Sharpe {s["avg_sharpe"]:.2f} across {s["n"]} pickups; '
+                           f'best: {html.escape(s["best"].player_name)} at {s["best"].sharpe:.2f})</p>')
             if trades:
                 trade_rows = "".join(f"<li>Week {t.week}: {html.escape(_format_trade(season, t))}</li>" for t in trades)
                 bits.append(f"<p><strong>Trades ({len(trades)}):</strong></p><ul>{trade_rows}</ul>")
@@ -1102,6 +1761,37 @@ def render_html(season, awards, roasts, period_label, season_stats=None,
               {_caption_html("median_whatif_to_date")}
               <table><tr><th>Team</th><th>Record vs Median</th></tr>{rows}</table>"""
 
+    deep_dive_html = ""
+    if weeks:
+        deep_dive_html = _deep_dive_html(season, weeks, upto_week)
+
+    contents_html = _contents_html([
+        ("sec-month", "The Month in Detail"),
+        ("sec-standings", "Where Everyone Stands"),
+        ("sec-deep", "Under the Hood"),
+        ("sec-market", "The Market"),
+        ("sec-charts", "The Charts"),
+        ("sec-appendix", "Appendix: New Analytics"),
+    ]) if kind == "monthly" else ""
+
+    narrative_html = ""
+    if kind == "monthly":
+        narrative_html = _month_narrative_html(season, month_stats or {},
+                                               prev_month_stats, period_label)
+
+    # Established charts stay in the body; everything added recently is
+    # quarantined in the appendix while it's being trialled.
+    charts_html = _charts_html(
+        _season_chart_specs(season, season_stats, month_stats, upto_week))
+
+    appendix_specs = _manager_chart_specs(season, weeks, upto_week)
+    if kind == "season":
+        appendix_specs += _draft_chart_specs(season)
+    appendix_charts_html = _charts_html(appendix_specs, heading="",
+                                        var_name="CHART_DATA_APPENDIX", include_libs=False)
+    appendix_html = _appendix_html(
+        [deep_dive_html, playoff_html, appendix_charts_html])
+
     month_html = ""
     if month_stats:
         rows = ""
@@ -1130,7 +1820,10 @@ def render_html(season, awards, roasts, period_label, season_stats=None,
       Season: {html.escape(season.season)} &nbsp; Managers: {len(season.teams)}</div>
   </div>
 
+  {contents_html}
+
   {recap_html}
+  {narrative_html}
 
   <div class="bar fame page-start">🏆 Hall of Fame</div>
   <div class="grid">{fame_cards}</div>
@@ -1140,24 +1833,32 @@ def render_html(season, awards, roasts, period_label, season_stats=None,
 
   <div class="page-start"></div>
 
+  <h2 class="section-head" id="sec-month">The Month in Detail</h2>
   {month_html}
   {closest_html}
 
   {pdf_table}
 
-  <h2 class="screen-only">{standings_heading}</h2>
+  <h2 class="section-head screen-only" id="sec-standings">Where Everyone Stands</h2>
+  <h3 class="screen-only">{standings_heading}</h3>
   <table class="screen-only"><tr><th>#</th><th>Team</th><th>W-L</th><th>PF</th><th>PA</th><th>Form</th></tr>{st_rows}</table>
-
-  {_charts_html(_season_chart_specs(season, season_stats, month_stats, upto_week))}
-
   <div class="screen-only">{power_rank_html}{luck_html}{median_html}</div>
+
+  <h2 class="section-head page-start" id="sec-deep">Under the Hood</h2>
   {draft_value_html}
+
+  <h2 class="section-head page-start" id="sec-market">The Market</h2>
   {waiver_html}
+
+  <h2 class="section-head page-start" id="sec-charts">The Charts</h2>
+  {charts_html}
+
+  {appendix_html}
 </div></body></html>"""
 
 
 def render_weekly_html(season, awards, roasts, period_label, week, rivalry_matchups=None, recap="",
-                       tier="normal") -> str:
+                       tier="normal", playoff_odds=None, pickup_odds_swing=None) -> str:
     fame = [a for a in awards if a.hall == "fame"]
     shame = [a for a in awards if a.hall == "shame"]
 
@@ -1189,7 +1890,33 @@ def render_weekly_html(season, awards, roasts, period_label, week, rivalry_match
     scores = S.weekly_scores(wd)
     pairs = S.matchup_pairs(wd)
     week_stats = S.week_report_stats(season, week)
-    charts_html = _charts_html(_weekly_chart_specs(season, week_stats))
+    charts_html = _charts_html(_weekly_chart_specs(season, week_stats, week=week))
+
+    # Season-to-date context in a single-week report. Playoff odds belong here
+    # more than anywhere: they move most in the week that moved them, and
+    # "your odds fell 14 points on Sunday" is a weekly sentence.
+    weekly_playoff_html = ""
+    if playoff_odds:
+        rows = "".join(f"<tr><td>{html.escape(season.team_name(rid))}</td>"
+                       f"<td class='num'>{odds * 100:.1f}%</td></tr>"
+                       for rid, odds in sorted(playoff_odds.items(),
+                                               key=lambda kv: kv[1], reverse=True))
+        swing_note = ""
+        if pickup_odds_swing is not None:
+            swing_note = (f"<p>This week's best waiver add was worth "
+                          f"<strong>{pickup_odds_swing:+.1f}%</strong> of playoff odds "
+                          f"to the team that made it.</p>")
+        weekly_playoff_html = (f"<h2>Playoff Odds (Monte Carlo, rest of regular season)</h2>"
+                               f"<table><tr><th>Team</th><th>Odds</th></tr>{rows}</table>"
+                               f"{swing_note}")
+
+    weekly_deep_dive_html = _deep_dive_html(season, list(range(1, week + 1)), week)
+
+    weekly_appendix_charts = _charts_html(
+        _weekly_appendix_chart_specs(season, week), heading="",
+        var_name="CHART_DATA_APPENDIX", include_libs=False)
+    weekly_appendix_html = _appendix_html(
+        [weekly_deep_dive_html, weekly_playoff_html, weekly_appendix_charts])
 
     no_matchup_html = "" if pairs else (
         '<div class="notice">No head-to-head matchups recorded for this week (likely outside '
@@ -1334,6 +2061,7 @@ def render_weekly_html(season, awards, roasts, period_label, week, rivalry_match
   <div class="screen-only">{power_html}{luck_index_html}{median_html}</div>
   {charts_html}
   {rivalry_html}
+  {weekly_appendix_html}
 </div></body></html>"""
 
 

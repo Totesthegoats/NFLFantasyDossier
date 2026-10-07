@@ -12,6 +12,11 @@ on:
         description: "Sheet tab to read (leave blank for the scheduled default: production)"
         required: false
         default: "Test"
+      show_appendix:
+        description: "Force the new-analytics appendix on, even before it has enough data to mean anything"
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   send:
@@ -43,6 +48,12 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          # Renders the appendix regardless of how many weeks have been played.
+          # Defaults on for a manual run (that's the point of dispatching one)
+          # and stays off for the schedule, so the weekly mail to subscribers
+          # keeps its own gating — at week 1 those tables read 0.5 expected
+          # wins for every team and a blank chart.
+          SLEEPER_SHOW_APPENDIX: ${{ (github.event_name == 'workflow_dispatch' && inputs.show_appendix) && '1' || '' }}
         run: |
           python -m sleeper_dossier.batch \
             --sheet "${{ secrets.SHEET_ID }}" \

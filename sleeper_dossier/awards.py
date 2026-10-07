@@ -184,11 +184,87 @@ def a_wheeler_dealer(ctx):
                  image_kind="player", player_id=bp.player_id)
 
 
+def _points_lost(e) -> float:
+    """Points a lineup left behind vs its own optimal lineup. Unlike raw bench
+    points this is fair across bench sizes: a deep dynasty bench always holds
+    hundreds of points, but only the ones that should have started count."""
+    return max(0.0, e.optimal - e.actual)
+
+
+def a_bench_warmer(ctx):
+    """Most points lost to start/sit calls this week. _SEVERITY_FNS already
+    had a bespoke scorer for this title; the award was never registered."""
+    eff = ctx["efficiency"]
+    if not eff:
+        return None
+    r = sorted(eff.values(), key=_points_lost, reverse=True)
+    top = r[0]
+    if _points_lost(top) <= 0:
+        return None
+    star = (f" ({top.best_benched_player} sat with {top.best_benched_points:.1f})"
+            if top.best_benched_player else "")
+    award = Award("Bench Warmer of the Week", "Most points lost to start/sit calls", "shame",
+                  top.roster_id, f"{_points_lost(top):.1f} pts left on the bench{star}",
+                  [(e.roster_id, f"{_points_lost(e):.1f} pts") for e in r[1:3]])
+    if top.best_benched_player_id:
+        award.image_kind, award.player_id = "player", top.best_benched_player_id
+    return award
+
+
+def a_dead_weight(ctx):
+    """Lowest-scoring player anyone actually started this week."""
+    worst = None
+    for rid, wt in ctx["week_data"].items():
+        for pid, pts in zip(wt.starters, wt.starter_points or []):
+            if not pid or pid == "0":
+                continue
+            if worst is None or pts < worst[2]:
+                worst = (rid, pid, pts)
+    if not worst:
+        return None
+    rid, pid, pts = worst
+    name = S.D.player_name(ctx["season"].players, pid)
+    return Award("Dead Weight", "Lowest-scoring starter in the league", "shame",
+                 rid, f"started {name} for {pts:.1f} pts", [], image_kind="player", player_id=pid)
+
+
+def a_flattened(ctx):
+    """The losing side of the week's biggest blowout."""
+    pairs = ctx["pairs"]
+    if not pairs:
+        return None
+    ra, pa, rb, pb = max(pairs, key=lambda p: abs(p[1] - p[3]))
+    if pa == pb:
+        return None
+    loser = ra if pa < pb else rb
+    return Award("Flattened", "Biggest blowout loss", "shame",
+                 loser, f"lost by {abs(pa - pb):.1f} ({min(pa, pb):.1f}-{max(pa, pb):.1f})", [])
+
+
+def a_own_goal(ctx):
+    """Lost a matchup that their own optimal lineup would have won."""
+    eff = ctx["efficiency"]
+    cands = []
+    for ra, pa, rb, pb in ctx["pairs"]:
+        for me, mine, theirs in ((ra, pa, pb), (rb, pb, pa)):
+            e = eff.get(me)
+            if mine < theirs and e and e.optimal > theirs:
+                cands.append((me, e.optimal - theirs, theirs - mine, e))
+    if not cands:
+        return None
+    rid, would_win_by, lost_by, e = max(cands, key=lambda c: c[1])
+    star = (f"; {e.best_benched_player} ({e.best_benched_points:.1f}) was on the bench"
+            if e.best_benched_player else "")
+    return Award("Own Goal", "Lost a game their bench would have won", "shame",
+                 rid, f"lost by {lost_by:.1f}, best lineup wins by {would_win_by:.1f}{star}", [])
+
+
 WEEKLY_AWARDS = [
     a_top_of_pile, a_sharpshooter, a_highway_robbery,
     a_wheeler_dealer, a_coin_flip_king, a_nail_biter,
     a_bottom_feeder, a_bumbling_boss, a_robbed,
     a_faab_fumbler, a_sleepwalker,
+    a_bench_warmer, a_dead_weight, a_flattened, a_own_goal,
 ]
 
 
@@ -406,16 +482,16 @@ def _median_deviation_metric(season, wk, wd):
     return {rid: wt.points - med for rid, wt in wd.items()}
 
 
-def _bench_points_metric(season, wk, wd):
-    return {rid: e.bench_points for rid, e in S.lineup_efficiency(season, wd).items()}
+def _points_lost_metric(season, wk, wd):
+    return {rid: _points_lost(e) for rid, e in S.lineup_efficiency(season, wd).items()}
 
 
 def _severity_bench_warmer(award, ctx):
     eff = ctx["efficiency"].get(award.winner_rid)
     if not eff:
         return 50.0
-    pool = S.season_metric_distribution(ctx["season"], _bench_points_metric, upto_week=ctx["week"])
-    return S.severity_from_pool(eff.bench_points, pool)
+    pool = S.season_metric_distribution(ctx["season"], _points_lost_metric, upto_week=ctx["week"])
+    return S.severity_from_pool(_points_lost(eff), pool)
 
 
 def _severity_match_margin(award, ctx):
@@ -804,6 +880,145 @@ def m_giant_killer(ctx):
     return None
 
 
+def m_bench_warmer(ctx):
+    """Most points lost to start/sit calls this month (optimal minus actual,
+    summed over the month's weeks), not raw bench totals."""
+    season, weeks = ctx["season"], ctx["weeks"]
+    lost: dict = {}
+    for wk in weeks:
+        wd = season.weeks.get(wk)
+        if not wd:
+            continue
+        for rid, e in S.lineup_efficiency(season, wd).items():
+            lost[rid] = lost.get(rid, 0.0) + _points_lost(e)
+    if not lost:
+        return None
+    r = sorted(lost.items(), key=lambda kv: kv[1], reverse=True)
+    rid, pts = r[0]
+    if pts <= 0:
+        return None
+    return Award("Bench Warmer of the Month", "Most points lost to start/sit calls this month",
+                 "shame", rid, f"{pts:.0f} pts left on the bench",
+                 [(rid2, f"{p2:.0f} pts") for rid2, p2 in r[1:3]])
+
+
+def m_rock_bottom(ctx):
+    """Opposite of Peak of the Month: the lowest single week this month."""
+    ms = ctx["month_stats"]
+    top = min(ms.values(), key=lambda m: m.worst_week)
+    return Award("Rock Bottom", "Lowest single week this month", "shame",
+                 top.roster_id, f"{top.worst_week:.1f} pts", [])
+
+
+def m_ice_cold(ctx):
+    """Opposite of On a Heater: worst all-play form this month."""
+    ms = ctx["month_stats"]
+    top = min(ms.values(),
+              key=lambda m: m.all_play_w / max(1, m.all_play_w + m.all_play_l))
+    return Award("Ice Cold", "Worst all-play form this month", "shame",
+                 top.roster_id, f"{top.all_play_w}-{top.all_play_l} all-play", [])
+
+
+def m_fraud_alert(ctx):
+    """Most head-to-head wins above what their scores earned against the whole
+    league. Needs at least a full extra win of luck to be worth calling out."""
+    ms = ctx["month_stats"]
+    cands = []
+    for m in ms.values():
+        games = m.h2h_w + m.h2h_l + m.h2h_t
+        ap = m.all_play_w + m.all_play_l
+        if not games or not ap:
+            continue
+        expected = m.all_play_w / ap * games
+        cands.append((m, (m.h2h_w + 0.5 * m.h2h_t) - expected, expected))
+    if not cands:
+        return None
+    m, surplus, expected = max(cands, key=lambda c: c[1])
+    if surplus < 1.0:
+        return None
+    return Award("Fraud Alert", "Most wins above what their scores deserved this month", "shame",
+                 m.roster_id,
+                 f"{m.h2h_w}-{m.h2h_l} on scores worth {expected:.1f} wins ({surplus:+.1f})", [])
+
+
+def m_own_goal(ctx):
+    """Most losses this month that their own optimal lineup would have won."""
+    season, weeks = ctx["season"], ctx["weeks"]
+    tally: dict = {}
+    for wk in weeks:
+        wd = season.weeks.get(wk)
+        if not wd:
+            continue
+        eff = S.lineup_efficiency(season, wd)
+        for ra, pa, rb, pb in S.matchup_pairs(wd):
+            for me, mine, theirs in ((ra, pa, pb), (rb, pb, pa)):
+                e = eff.get(me)
+                if mine < theirs and e and e.optimal > theirs:
+                    tally.setdefault(me, []).append(wk)
+    if not tally:
+        return None
+    r = sorted(tally.items(), key=lambda kv: len(kv[1]), reverse=True)
+    rid, wks = r[0]
+    n = len(wks)
+    return Award("Own Goal of the Month", "Most losses their bench would have won", "shame",
+                 rid, f"{n} loss{'es' if n != 1 else ''} the best lineup wins "
+                      f"(week{'s' if n != 1 else ''} {', '.join(str(w) for w in wks)})",
+                 [(rid2, f"{len(w2)}") for rid2, w2 in r[1:3]])
+
+
+def m_waiver_disaster(ctx):
+    """The month's worst single FAAB spend: high cost per point, or money for nothing."""
+    fm = ctx.get("worst_faab")
+    if not fm:
+        return None
+    if fm.points_since <= 0:
+        val = f"spent ${fm.faab} on {fm.player_name} for {fm.points_since:.0f} pts"
+    else:
+        val = f"${fm.faab} on {fm.player_name} = ${fm.cost_per_point}/pt"
+    return Award("Waiver Disaster of the Month", "Worst FAAB spend this month", "shame",
+                 fm.roster_id, val, [], image_kind="player", player_id=fm.player_id)
+
+
+def m_most_regressed(ctx):
+    """Opposite of Most Improved: biggest points-per-week drop vs last month."""
+    ms = ctx["month_stats"]
+    prev = ctx.get("prev_month_stats") or {}
+    deltas = [(rid, m.avg_points - prev[rid].avg_points, m, prev[rid])
+              for rid, m in ms.items() if rid in prev]
+    if not deltas:
+        return None
+    rid, delta, m, p = min(deltas, key=lambda x: x[1])
+    if delta >= 0:
+        return None
+    return Award("Fell Off a Cliff", "Biggest points-per-week drop vs last month", "shame",
+                 rid, f"{delta:.1f} pts/wk vs last month ({p.avg_points:.1f} -> {m.avg_points:.1f})", [])
+
+
+def m_doormat(ctx):
+    """Opposite of Giant Killer: lost to this month's lowest-scoring team.
+    None if that team lost every game this month (nobody was the doormat)."""
+    season, weeks, ms = ctx["season"], ctx["weeks"], ctx["month_stats"]
+    if not ms:
+        return None
+    minnow_rid = min(ms.values(), key=lambda m: m.total_points).roster_id
+    for wk in weeks:
+        wd = season.weeks.get(wk)
+        if not wd:
+            continue
+        for ra, pa, rb, pb in S.matchup_pairs(wd):
+            if minnow_rid not in (ra, rb):
+                continue
+            winner = ra if pa > pb else rb
+            if pa != pb and winner == minnow_rid:
+                loser = rb if winner == ra else ra
+                lp = pa if loser == ra else pb
+                return Award("Doormat", "Lost to this month's lowest-scoring team", "shame",
+                             loser,
+                             f"beaten by {season.team_name(minnow_rid)} in week {wk} "
+                             f"({lp:.1f}-{max(pa, pb):.1f})", [])
+    return None
+
+
 MONTHLY_AWARDS = [
     m_manager_of_month, m_biggest_climber, m_month_efficiency,
     m_hot_hand, m_month_high, m_wheeler_dealer, m_waiver_warrior, m_faabulous,
@@ -811,6 +1026,8 @@ MONTHLY_AWARDS = [
     m_best_below_500, m_lineup_wizard, m_bench_hero, m_closest_survivor,
     m_most_improved, m_giant_killer,
     m_wooden_spoon, m_biggest_faller, m_month_bumbler, m_the_mark, m_waiver_washout,
+    m_bench_warmer, m_rock_bottom, m_ice_cold, m_fraud_alert, m_own_goal,
+    m_waiver_disaster, m_most_regressed, m_doormat,
 ]
 
 
@@ -827,6 +1044,7 @@ def compute_monthly(season, month_stats, prev_month_stats=None):
         "faab_totals": W.faab_spent_by_team(season, weeks),
         "best_pickup": W.best_pickup_period(season, weeks),
         "best_trade": W.best_trade_period(season, weeks),
+        "worst_faab": W.worst_faab_period(season, weeks),
     }
     results = []
     for fn in MONTHLY_AWARDS:

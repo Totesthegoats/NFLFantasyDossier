@@ -53,6 +53,7 @@ from . import waivers as W
 from . import history as H
 from . import decision as DEC
 from . import trial as T
+from . import sim as SIM
 
 
 def generate_one(league_id, month_arg=None, week_arg=None, do_season=False,
@@ -94,12 +95,16 @@ def generate_one(league_id, month_arg=None, week_arg=None, do_season=False,
             week=week, rivalry_matchups=rivalry_matchups) if do_roast else {}
         roasts = commentary.get("roasts", {})
         recap = commentary.get("recap", "")
+        playoff_odds, pickup_odds_swing = SIM.odds_for_report(season, week, [week])
         html_out = RND.render_weekly_html(season, awards, roasts, period_label=label, week=week,
-                                          rivalry_matchups=rivalry_matchups, recap=recap, tier=tier)
+                                          rivalry_matchups=rivalry_matchups, recap=recap, tier=tier,
+                                          playoff_odds=playoff_odds,
+                                          pickup_odds_swing=pickup_odds_swing)
         pdf_out = PRND.render_pdf_weekly_html(
             season, awards, roasts, period_label=label, week=week,
             rivalry_matchups=rivalry_matchups, recap=recap,
-            decision_lines=dec_lines, decision_awards=dec_awards) if do_pdf else None
+            decision_lines=dec_lines, decision_awards=dec_awards,
+            playoff_odds=playoff_odds) if do_pdf else None
         email_html = RND.render_email_html(season, awards, roasts, label,
                                            pdf_attached=bool(pdf_out))
         return season, html_out, pdf_out, label, email_html
@@ -160,13 +165,21 @@ def generate_one(league_id, month_arg=None, week_arg=None, do_season=False,
     recap = commentary.get("recap", "")
     waiver_take = R.write_waiver_take(season, kind="monthly", period=period, best=best, worst=worst,
                                       faab_totals=faab_totals, trades=trades) if do_roast else ""
+
+    # Monte Carlo playoff odds + the best pickup's effect on them.
+    upto_week = max(weeks)
+    playoff_odds, pickup_odds_swing = SIM.odds_for_report(season, upto_week, weeks)
+
     html_out = RND.render_html(season, awards, roasts, period_label=label,
                                season_stats=ss, kind="monthly", month_stats=ms, recap=recap,
-                               waiver_take=waiver_take, tier=tier)
+                               waiver_take=waiver_take, tier=tier, playoff_odds=playoff_odds,
+                               pickup_odds_swing=pickup_odds_swing,
+                               prev_month_stats=prev_ms)
     pdf_out = PRND.render_pdf_html(
         season, awards, roasts, period_label=label,
         season_stats=ss, kind="monthly", month_stats=ms,
-        recap=recap, waiver_take=waiver_take) if do_pdf else None
+        recap=recap, waiver_take=waiver_take,
+        playoff_odds=playoff_odds) if do_pdf else None
     email_html = RND.render_email_html(season, awards, roasts, label,
                                        pdf_attached=bool(pdf_out))
     return season, html_out, pdf_out, label, email_html

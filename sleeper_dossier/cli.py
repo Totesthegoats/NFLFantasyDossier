@@ -41,6 +41,7 @@ from . import monthly as M
 from . import waivers as W
 from . import history as H
 from . import decision as DEC
+from . import sim as SIM
 
 
 def _parse_month(s):
@@ -155,8 +156,11 @@ def main(argv=None):
         recap = commentary.get("recap", "")
         text = RND.render_weekly_text(season, awards, roasts, period_label=label, week=week,
                                       rivalry_matchups=rivalry_matchups, recap=recap)
+        playoff_odds, pickup_odds_swing = SIM.odds_for_report(season, week, [week])
         html_out = RND.render_weekly_html(season, awards, roasts, period_label=label, week=week,
-                                          rivalry_matchups=rivalry_matchups, recap=recap)
+                                          rivalry_matchups=rivalry_matchups, recap=recap,
+                                          playoff_odds=playoff_odds,
+                                          pickup_odds_swing=pickup_odds_swing)
     else:
         (yr, mo), weeks, buckets = _resolve_month(season, args.month)
         if not weeks:
@@ -180,12 +184,20 @@ def main(argv=None):
         waiver_take = "" if args.no_roast else R.write_waiver_take(
             season, kind="monthly", period=period, best=best, worst=worst,
             faab_totals=faab_totals, trades=trades)
+
+        # Monte Carlo playoff odds + the best pickup's effect on them.
+        upto_week = max(weeks)
+        playoff_odds, pickup_odds_swing = SIM.odds_for_report(season, upto_week, weeks)
+
         text = RND.render_text(season, awards, roasts, period_label=label,
                                season_stats=ss, kind="monthly", month_stats=ms, recap=recap,
-                               waiver_take=waiver_take)
+                               waiver_take=waiver_take, playoff_odds=playoff_odds,
+                               pickup_odds_swing=pickup_odds_swing)
         html_out = RND.render_html(season, awards, roasts, period_label=label,
                                    season_stats=ss, kind="monthly", month_stats=ms, recap=recap,
-                                   waiver_take=waiver_take)
+                                   waiver_take=waiver_take, playoff_odds=playoff_odds,
+                                   pickup_odds_swing=pickup_odds_swing,
+                                   prev_month_stats=prev_ms)
 
     print(text)
     if args.html:
