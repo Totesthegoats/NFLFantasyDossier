@@ -253,6 +253,32 @@ body { margin: 0; font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial
 h3.section-label { margin: 0 0 6px; font-size: 9px; text-transform: uppercase;
                    letter-spacing: .06em; color: #41506b; }
 
+/* ── manager profiles — 2x2 cards, radar left, stats right ─────── */
+.profiles-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.profile-card { background: #fff; border: 1px solid #e3e8f0; border-radius: 10px;
+                overflow: hidden; height: 79mm; }
+.profile-head { display: flex; align-items: center; gap: 8px; background: var(--navy);
+                color: #fff; padding: 6px 10px; }
+.profile-head .team { font-size: 13px; font-weight: 800; font-style: italic; }
+.profile-head .rec { font-size: 9px; opacity: .7; }
+.profile-body { display: flex; gap: 8px; padding: 6px 10px; }
+.profile-radar { flex: 0 0 232px; text-align: center; }
+.profile-identity { font-size: 8.5px; color: #41506b; font-style: italic; margin-top: 2px; }
+.profile-noradar { height: 190px; display: flex; align-items: center; justify-content: center;
+                   font-size: 9px; color: var(--muted); text-align: center; padding: 0 16px; }
+.profile-stats { flex: 1; min-width: 0; }
+.profile-stats table { width: 100%; border-collapse: collapse; font-size: 9px; }
+.profile-stats th { text-align: left; color: #7a8aa3; font-weight: 600; padding: 3px 6px 3px 0;
+                    white-space: nowrap; vertical-align: top; font-size: 8px;
+                    text-transform: uppercase; letter-spacing: .03em; }
+.profile-stats td { padding: 3px 0; border-bottom: 1px solid #f0f4f9; color: #26344d; }
+.profile-chips { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; }
+.chip { font-size: 8px; font-weight: 700; color: #fff; border-radius: 9px; padding: 2px 7px; }
+.chip.fame  { background: var(--navy); }
+.chip.shame { background: var(--red); }
+.league-facts { margin-top: 12px; }
+.league-facts ul { margin: 0; padding-left: 14px; font-size: 9.5px; line-height: 1.5; color: #26344d; }
+
 /* ── rivalry cards — 2-col, bigger, with season history ─────────── */
 .rivalry-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 11px; }
 .rivalry-card { background: #fff; border: 1px solid #e3e8f0;
@@ -2079,6 +2105,231 @@ def _appendix_tables_html(season, weeks: list, upto_week: int, playoff_odds=None
 
 
 
+# ── Manager Profiles & Power/Luck (monthly + season main body) ────────────
+#
+# Built from profiles.build(), which gathers analytics.py and the manager
+# fingerprint. These used to be appendix-only (and the fingerprint covered a
+# single manager); they are now part of the main report, one card per manager.
+
+_PROFILES_PER_PAGE = 4
+_PROFILE_RADAR_W = 230
+_PROFILE_RADAR_H = 190
+_ELO_CHART_W = 1010
+_ELO_CHART_H = 400
+
+
+def _ord(n) -> str:
+    if n is None:
+        return "-"
+    suf = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suf}"
+
+
+def _signed_cls(v, eps: float = 0.05) -> str:
+    if v is None:
+        return ""
+    return "lucky" if v > eps else ("robbed" if v < -eps else "")
+
+
+def _profile_radar_id(rid) -> str:
+    return f"profileRadar{rid}"
+
+
+def _profile_radar_specs(season, profiles: dict) -> list:
+    from .render import _radar_spec
+    from . import manager as MG
+    specs = []
+    for rid in profiles.get("order", []):
+        fp = profiles["teams"][rid]["fingerprint"]
+        if not fp:
+            continue
+        spec = _radar_spec(_profile_radar_id(rid), season.team_name(rid), MG.FINGERPRINT_AXES,
+                           [fp[a] for a in MG.FINGERPRINT_AXES], season.team_name(rid))
+        spec["width"], spec["height"] = _PROFILE_RADAR_W, _PROFILE_RADAR_H
+        specs.append(spec)
+    return specs
+
+
+def _elo_chart_spec(season, profiles: dict):
+    from .render import _line_spec
+    series_by_rid = (profiles.get("league") or {}).get("elo_series") or {}
+    if not series_by_rid:
+        return None
+    weeks = sorted({w for s in series_by_rid.values() for w, _v in s})
+    if not weeks:
+        return None
+    period = set(profiles.get("period") or [])
+    series = []
+    for rid in profiles.get("order", []):
+        pts = dict(series_by_rid.get(rid, []))
+        if not pts:
+            continue
+        series.append({"label": season.team_name(rid),
+                       "data": [1500.0] + [pts.get(w) for w in weeks],
+                       "emphasis": False})
+    labels = ["Start"] + [f"Wk {w}" + ("*" if w in period else "") for w in weeks]
+    spec = _line_spec("eloTrajectoryChart", "Elo Rating, Week by Week", labels, series,
+                      "Week (* = this report's period)", "Elo rating")
+    spec["caption"] = ("Every team starts at 1500. Beating a stronger team, or winning big, "
+                       "moves you further. Rising lines are teams playing above their rating.")
+    spec["width"], spec["height"] = _ELO_CHART_W, _ELO_CHART_H
+    return spec
+
+
+def _has_profiles(ctx):
+    return bool((ctx.get("profiles") or {}).get("teams"))
+
+
+def _profile_card(season, p: dict) -> str:
+    rid = p["roster_id"]
+    team = season.teams.get(rid)
+    uri = IMG.to_data_uri(IMG.manager_avatar_url(team))
+    sil = IMG.SILHOUETTE_DATA_URI
+    avatar = (f'<img class="avatar manager" src="{uri}" '
+              f'onerror="this.onerror=null;this.src=\'{sil}\'">')
+
+    rec = f"Season {p['record']}"
+    if p.get("month_record"):
+        rec += f" &middot; this period {p['month_record']}"
+
+    rows = []
+    m = p.get("massey")
+    if m:
+        rows.append(("Power rating",
+                     f"<span class='{_signed_cls(m['rating'])}'>{m['rating']:+.1f}</span> pts/g "
+                     f"vs avg team &middot; {_ord(p.get('massey_rank'))}"))
+        sos_word = "tougher" if m["sos"] > 0.5 else ("easier" if m["sos"] < -0.5 else "average")
+        rows.append(("Schedule faced", f"{m['sos']:+.1f} ({sos_word} than average)"))
+    e = p.get("elo")
+    if e:
+        ch = (p.get("elo_period") or {}).get("change")
+        ch_html = (f" &middot; <span class='{_signed_cls(ch, 0.5)}'>{ch:+.0f}</span> this period"
+                   if ch is not None else "")
+        rows.append(("Elo", f"{e['end']:.0f} ({_ord(p.get('elo_rank'))}){ch_html}"))
+    sh = p.get("shrunk")
+    if sh:
+        rows.append(("True scoring level",
+                     f"{sh['shrunk']:.1f} pts/g (raw {sh['ppg']:.1f}) &middot; "
+                     f"likely {sh['ci_low']:.0f}&ndash;{sh['ci_high']:.0f}"))
+    lk = p.get("luck")
+    if lk:
+        rows.append(("Wins explained",
+                     f"{lk['actual']:g} won = {lk['talent']:.1f} talent "
+                     f"<span class='{_signed_cls(lk['schedule'])}'>{lk['schedule']:+.1f}</span> schedule "
+                     f"<span class='{_signed_cls(lk['lineup'])}'>{lk['lineup']:+.1f}</span> lineup calls"))
+    if p.get("month_vs_avg") is not None:
+        rows.append(("This period",
+                     f"<span class='{_signed_cls(p['month_vs_avg'])}'>{p['month_vs_avg']:+.1f}</span> pts vs avg"
+                     + (f" &middot; {p['month_efficiency']:.0f}% lineup efficiency"
+                        if p.get("month_efficiency") is not None else "")))
+
+    rows_html = "".join(f"<tr><th>{_esc(k)}</th><td>{v}</td></tr>" for k, v in rows)
+    chips = "".join(f'<span class="chip {hall}">{_esc(t)}</span>' for t, hall in p.get("awards", []))
+    chips_html = f'<div class="profile-chips">{chips}</div>' if chips else ""
+    ident = (f'<div class="profile-identity">{_esc(p["identity"])}</div>'
+             if p.get("identity") else "")
+    radar = (f'<canvas id="{_profile_radar_id(rid)}" width="{_PROFILE_RADAR_W}" '
+             f'height="{_PROFILE_RADAR_H}"></canvas>'
+             if p.get("fingerprint") else
+             '<div class="profile-noradar">Fingerprint appears once enough weeks are played</div>')
+    return (f'<div class="profile-card">'
+            f'<div class="profile-head">{avatar}<div><div class="team">{_esc(season.team_name(rid))}</div>'
+            f'<div class="rec">{rec}</div></div></div>'
+            f'<div class="profile-body"><div class="profile-radar">{radar}{ident}</div>'
+            f'<div class="profile-stats"><table>{rows_html}</table>{chips_html}</div></div>'
+            f'</div>')
+
+
+def _render_manager_profiles(ctx: dict) -> list:
+    season, profiles = ctx["season"], ctx.get("profiles") or {}
+    order = profiles.get("order", [])
+    pages = []
+    for i in range(0, len(order), _PROFILES_PER_PAGE):
+        cards = "".join(_profile_card(season, profiles["teams"][rid])
+                        for rid in order[i:i + _PROFILES_PER_PAGE])
+        pages.append(f'<div class="profiles-grid">{cards}</div>')
+    if pages:
+        pages[0] = ('<p class="chart-caption" style="margin-bottom:8px">Ordered by power rating. '
+                    'The radar shows how each manager plays, scaled against this league, so every '
+                    'axis has a 0 and a 100. It describes style, not quality.</p>' + pages[0])
+    return pages
+
+
+def _render_power_luck(ctx: dict) -> str:
+    season, profiles = ctx["season"], ctx.get("profiles") or {}
+    teams, order = profiles.get("teams", {}), profiles.get("order", [])
+
+    power_rows = ""
+    for rid in order:
+        p = teams[rid]
+        m, e, sh = p.get("massey") or {}, p.get("elo") or {}, p.get("shrunk") or {}
+        ch = (p.get("elo_period") or {}).get("change")
+        power_rows += (
+            f"<tr>{_manager_cell(season, rid)}"
+            f"<td class='num'>{p['record']}</td>"
+            f"<td class='num {_signed_cls(m.get('rating'))}'>{m.get('rating', 0):+.1f}</td>"
+            f"<td class='num'>{m.get('sos', 0):+.1f}</td>"
+            f"<td class='num'>{e.get('end', 0):.0f}</td>"
+            f"<td class='num {_signed_cls(ch, 0.5)}'>{(ch or 0):+.0f}</td>"
+            f"<td class='num'>{sh.get('shrunk', 0):.1f}</td></tr>")
+    power = ('<div><h3 class="section-label">Power ratings (opponent-adjusted)</h3>'
+             '<table class="stats-table"><tr><th>Team</th><th>Record</th><th>Power</th>'
+             '<th>SoS</th><th>Elo</th><th>Elo &Delta;</th><th>True pts/g</th></tr>'
+             f'{power_rows}</table>'
+             '<p class="chart-caption" style="margin-top:5px">Power: points per game better than an '
+             'average team here, after adjusting for opponents. SoS: average power of opponents '
+             'faced. Elo &Delta;: change over this period. True pts/g: scoring average pulled '
+             'toward the league mean by how noisy a few weeks are.</p></div>')
+
+    luck_rows = ""
+    luck_order = sorted((r for r in order if teams[r].get("luck")),
+                        key=lambda r: teams[r]["luck"]["schedule"] + teams[r]["luck"]["lineup"],
+                        reverse=True)
+    for rid in luck_order:
+        lk = teams[rid]["luck"]
+        luck_rows += (
+            f"<tr>{_manager_cell(season, rid)}"
+            f"<td class='num'>{lk['actual']:g}</td>"
+            f"<td class='num'>{lk['talent']:.1f}</td>"
+            f"<td class='num {_signed_cls(lk['schedule'])}'>{lk['schedule']:+.1f}</td>"
+            f"<td class='num {_signed_cls(lk['lineup'])}'>{lk['lineup']:+.1f}</td>"
+            f"<td class='num'>{lk['unexplained']:+.1f}</td></tr>")
+    luck = ('<div><h3 class="section-label">Where the wins came from (this period)</h3>'
+            '<table class="stats-table"><tr><th>Team</th><th>Wins</th><th>Talent</th>'
+            '<th>Schedule</th><th>Lineup</th><th>Other</th></tr>'
+            f'{luck_rows}</table>'
+            '<p class="chart-caption" style="margin-top:5px">Talent: wins your scores earned against '
+            'the whole league. Schedule: how much your fixtures helped (+) or hurt (&minus;). '
+            'Lineup: wins gained or lost by start/sit calls compared with perfect lineups.</p></div>'
+            ) if luck_rows else ""
+
+    lg = profiles.get("league") or {}
+    form, shl = lg.get("form") or {}, lg.get("shrunk") or {}
+    facts = []
+    if form:
+        facts.append(f"<li><strong>Momentum:</strong> {_esc(form['momentum'])} "
+                     f"(week-to-week correlation {form['autocorr']:+.2f}, n={form['pairs']}).</li>")
+        if form.get("split_half") is not None:
+            facts.append(f"<li><strong>Skill or luck:</strong> {_esc(form['reliability_verdict'])} "
+                         f"(odd vs even weeks r={form['split_half']:+.2f}, "
+                         f"n={form['split_half_n']} teams).</li>")
+    if shl:
+        facts.append(f"<li><strong>Signal vs noise:</strong> {shl['reliability']:.0f}% of a single "
+                     f"week's score is the team, the rest is the week. Typical swing week to week: "
+                     f"&plusmn;{shl['sigma']:.0f} pts; real gap between teams: &plusmn;{shl['tau']:.0f} pts.</li>")
+    facts_html = (f'<div class="league-facts"><h3 class="section-label">How this league plays</h3>'
+                  f'<ul>{"".join(facts)}</ul></div>') if facts else ""
+
+    return f'<div class="cols-2">{power}<div>{luck}{facts_html}</div></div>'
+
+
+def _has_elo_chart(ctx): return bool(ctx.get("elo_chart_spec"))
+
+
+def _render_elo_chart(ctx: dict) -> str:
+    return _chart_box(ctx["elo_chart_spec"], _ELO_CHART_W, _ELO_CHART_H)
+
+
 @dataclass
 class Section:
     id: str
@@ -2123,6 +2374,9 @@ MONTHLY_SECTIONS: list[Section] = [
     Section("hall-fame",   "Hall of Fame",           _render_hall_of_fame),
     Section("hall-shame",  "Hall of Shame",          _render_hall_of_shame),
     Section("standings",   "Standings",              _render_standings_monthly),
+    Section("power-luck",  "Power, Luck & Form",     _render_power_luck,       when=_has_profiles),
+    Section("elo",         "Elo Trajectory",         _render_elo_chart,        when=_has_elo_chart),
+    Section("profiles",    "Manager Profiles",       _render_manager_profiles, when=_has_profiles),
     Section("charts",      "Charts",                 _render_charts,           when=_has_charts),
     Section("analytics",   "Season Analysis",        _render_season_analytics),
     Section("appendix",    "Appendix: New Analytics", _render_appendix, when=_has_appendix),
@@ -2133,6 +2387,9 @@ SEASON_SECTIONS: list[Section] = [
     Section("hall-fame",   "Hall of Fame",           _render_hall_of_fame),
     Section("hall-shame",  "Hall of Shame",          _render_hall_of_shame),
     Section("standings",   "Standings",              _render_standings_monthly),
+    Section("power-luck",  "Power, Luck & Form",     _render_power_luck,       when=_has_profiles),
+    Section("elo",         "Elo Trajectory",         _render_elo_chart,        when=_has_elo_chart),
+    Section("profiles",    "Manager Profiles",       _render_manager_profiles, when=_has_profiles),
     Section("charts",      "Charts",                 _render_charts,           when=_has_charts),
     Section("analytics",   "Season Analysis",        _render_season_analytics),
     Section("appendix",    "Appendix: New Analytics", _render_appendix, when=_has_appendix),
@@ -2494,9 +2751,25 @@ def render_pdf_html(season, awards, roasts, period_label,
     weeks = _relevant_weeks(season, month_stats)
     upto_week = max(weeks) if month_stats else None
     specs = _season_chart_specs(season, season_stats, month_stats, upto_week)
-    appendix_specs = _manager_chart_specs(season, weeks, upto_week)
+    # Every manager's fingerprint now lives in the Manager Profiles section,
+    # so drop the appendix's single-manager copy of it.
+    appendix_specs = [s for s in _manager_chart_specs(season, weeks, upto_week)
+                      if s["id"] != "fingerprintChart"]
     if kind == "season":
         appendix_specs += _draft_chart_specs(season)
+
+    from . import profiles as PR
+    from .render import _weeks_played, _MIN_WEEKS_FINGERPRINT
+    last_week = upto_week if upto_week is not None else max(season.weeks or [0])
+    try:
+        profiles = PR.build(season, weeks, upto_week=last_week, month_stats=month_stats,
+                            awards=awards,
+                            with_fingerprint=_weeks_played(season, last_week) >= _MIN_WEEKS_FINGERPRINT)
+    except Exception as exc:
+        print(f"  [pdf_render] Manager profiles skipped: {exc}")
+        profiles = {}
+    profile_specs = _profile_radar_specs(season, profiles) if profiles else []
+    elo_spec = _elo_chart_spec(season, profiles) if profiles else None
     ctx = {
         "season": season, "awards": awards, "roasts": roasts,
         "period_label": period_label, "kind": kind,
@@ -2508,7 +2781,10 @@ def render_pdf_html(season, awards, roasts, period_label,
         # chart_specs feeds DOSSIER_DATA for the whole document, so the
         # appendix specs must be in it even though they render on their own
         # pages via _render_appendix rather than through _render_charts.
-        "recap": recap, "chart_specs": specs + appendix_specs,
+        "profiles": profiles,
+        "elo_chart_spec": elo_spec,
+        "recap": recap,
+        "chart_specs": specs + appendix_specs + profile_specs + ([elo_spec] if elo_spec else []),
     }
     sections = SEASON_SECTIONS if kind == "season" else MONTHLY_SECTIONS
     return _assemble(sections, ctx)
