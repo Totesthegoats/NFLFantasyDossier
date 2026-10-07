@@ -378,11 +378,18 @@ def trade_ledger(season, weeks: list, max_week: int | None = None) -> list:
             pts = _points_since(season, to_rid, pid, trade.week, max_week=max_week)
             sides[to_rid]["received_players"].append(D.player_name(season.players, pid))
             sides[to_rid]["pts_since"] += pts
-        # Draft picks received: pick["roster_id"] is the new owner
+        # Draft picks received. In Sleeper's trade payload pick["owner_id"] is
+        # the roster receiving the pick; pick["roster_id"] is the team whose
+        # draft slot it originally was, NOT the receiver, and is often neither
+        # side of the trade (a pick acquired earlier from a third team).
         for pick in (trade.draft_picks_raw or []):
-            to_rid = pick.get("roster_id")
-            if to_rid and to_rid in sides:
-                sides[to_rid]["received_picks"].append(_pick_label(pick))
+            to_rid = pick.get("owner_id")
+            if not to_rid:
+                continue
+            if to_rid not in sides:
+                sides[to_rid] = {"roster_id": to_rid, "manager": season.team_name(to_rid),
+                                 "received_players": [], "received_picks": [], "pts_since": 0.0}
+            sides[to_rid]["received_picks"].append(_pick_label(pick))
         for s in sides.values():
             s["pts_since"] = round(s["pts_since"], 2)
         out.append({"week": trade.week, "sides": list(sides.values()),
