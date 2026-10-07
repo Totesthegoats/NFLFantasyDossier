@@ -279,6 +279,21 @@ h3.section-label { margin: 0 0 6px; font-size: 9px; text-transform: uppercase;
 .league-facts { margin-top: 12px; }
 .league-facts ul { margin: 0; padding-left: 14px; font-size: 9.5px; line-height: 1.5; color: #26344d; }
 
+/* ── insights: position mix bars, fixture preview ─────────────────── */
+.pos-bar { display: flex; height: 10px; border-radius: 3px; overflow: hidden; background: #eef2f7; }
+.pos-bar span { display: block; height: 100%; }
+.pos-legend { display: flex; gap: 10px; font-size: 8.5px; color: #41506b; margin-bottom: 6px; }
+.pos-key i { display: inline-block; width: 8px; height: 8px; border-radius: 2px;
+             margin-right: 3px; vertical-align: -1px; }
+.preview-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+.fixture { margin: 5px 0 7px; }
+.fx-names { display: flex; justify-content: space-between; font-size: 9px; font-weight: 700;
+            color: #26344d; margin-bottom: 2px; }
+.fx-bar { display: flex; height: 13px; border-radius: 3px; overflow: hidden; font-size: 8px;
+          font-weight: 700; color: #fff; line-height: 13px; }
+.fx-a { background: var(--navy); text-align: left; padding-left: 4px; white-space: nowrap; overflow: hidden; }
+.fx-b { background: #9aa7bd; text-align: right; padding-right: 4px; white-space: nowrap; overflow: hidden; }
+
 /* ── rivalry cards — 2-col, bigger, with season history ─────────── */
 .rivalry-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 11px; }
 .rivalry-card { background: #fff; border: 1px solid #e3e8f0;
@@ -2330,6 +2345,165 @@ def _render_elo_chart(ctx: dict) -> str:
     return _chart_box(ctx["elo_chart_spec"], _ELO_CHART_W, _ELO_CHART_H)
 
 
+# ── Insights: leaderboard, playoff movers, positions, re-grades, preview ──
+
+_POS_COLORS = {"QB": "#15243b", "RB": "#19c37d", "WR": "#2e86c1", "TE": "#e67e22",
+               "K": "#8e44ad", "DEF": "#7a8aa3", "IDP": "#c0392b", "Other": "#d4ac0d"}
+
+
+def _has_leaderboard_page(ctx):
+    return bool((ctx.get("award_tally") or {}).get("teams") or ctx.get("playoff_movers"))
+
+
+def _render_leaderboard_page(ctx: dict) -> str:
+    season = ctx["season"]
+    blocks = []
+    tally = ctx.get("award_tally") or {}
+    if tally.get("teams"):
+        teams = tally["teams"]
+        order = sorted(teams, key=lambda r: (-teams[r]["shame"], teams[r]["fame"],
+                                             season.team_name(r)))
+        rows = ""
+        for rid in order:
+            t = teams[rid]
+            sig = (f"{_esc(t['signature'])}" + (f" &times;{t['signature_count']}"
+                                                if t["signature_count"] > 1 else "")
+                   if t.get("signature") else "&mdash;")
+            rows += (f"<tr>{_manager_cell(season, rid)}"
+                     f"<td class='num lucky'>{t['fame']}</td>"
+                     f"<td class='num robbed'>{t['shame']}</td>"
+                     f"<td class='num {_signed_cls(t['net'], 0)}'>{t['net']:+d}</td>"
+                     f"<td style='font-size:9px;color:#5b6b85'>{sig}</td></tr>")
+        months = tally.get("months", 0)
+        blocks.append(
+            f'<div><h3 class="section-label">Fame vs Shame: season so far '
+            f'({months} month{"s" if months != 1 else ""})</h3>'
+            '<table class="stats-table"><tr><th>Team</th><th>Fame</th><th>Shame</th>'
+            '<th>Net</th><th>Most-won shame award</th></tr>'
+            f'{rows}</table>'
+            '<p class="chart-caption" style="margin-top:5px">Every monthly award won this season, '
+            'most shamed first.</p></div>')
+
+    movers = ctx.get("playoff_movers") or {}
+    if movers:
+        order = sorted(movers, key=lambda r: movers[r]["change"], reverse=True)
+        rows = ""
+        for rid in order:
+            m = movers[rid]
+            ch = m["change"] * 100
+            arrow = "&#9650;" if ch > 0.5 else ("&#9660;" if ch < -0.5 else "&#9644;")
+            rows += (f"<tr>{_manager_cell(season, rid)}"
+                     f"<td class='num'>{m['start'] * 100:.0f}%</td>"
+                     f"<td class='num'><strong>{m['end'] * 100:.0f}%</strong></td>"
+                     f"<td class='num {_signed_cls(ch, 0.5)}'>{arrow} {ch:+.0f}</td></tr>")
+        blocks.append(
+            '<div><h3 class="section-label">Playoff odds movers</h3>'
+            '<table class="stats-table"><tr><th>Team</th><th>Start</th><th>Now</th>'
+            '<th>Change (pts)</th></tr>'
+            f'{rows}</table>'
+            '<p class="chart-caption" style="margin-top:5px">Chance of making the playoffs at the '
+            'start of this period vs now, from simulating the rest of the regular season '
+            'thousands of times.</p></div>')
+    if len(blocks) == 1:
+        return blocks[0]
+    return f'<div class="cols-2">{"".join(blocks)}</div>'
+
+
+def _has_positions(ctx):
+    return bool(ctx.get("position_points"))
+
+
+def _render_positions(ctx: dict) -> str:
+    from . import insights as IN
+    season, pp = ctx["season"], ctx.get("position_points") or {}
+    cols = IN.POSITIONS + ["Other"]
+    used = [c for c in cols if any(r["by_pos"].get(c, 0) for r in pp.values())]
+    order = sorted(pp, key=lambda r: pp[r]["total"], reverse=True)
+    legend = "".join(f'<span class="pos-key"><i style="background:{_POS_COLORS[c]}"></i>{c}</span>'
+                     for c in used)
+    rows = ""
+    for rid in order:
+        rec = pp[rid]
+        total = rec["total"] or 1.0
+        bar = "".join(
+            f'<span style="width:{max(0.0, rec["by_pos"][c]) / total * 100:.1f}%;'
+            f'background:{_POS_COLORS[c]}" title="{c}"></span>' for c in used)
+        shares = "".join(f"<td class='num'>{max(0.0, rec['by_pos'][c]) / total * 100:.0f}%</td>"
+                         for c in used)
+        top = (f"{_esc(rec['top_player'])} <span style='color:#7a8aa3'>"
+               f"({rec['top_share'] * 100:.0f}%)</span>" if rec.get("top_player") else "&mdash;")
+        rows += (f"<tr>{_manager_cell(season, rid)}"
+                 f"<td class='num'>{rec['total']:.0f}</td>"
+                 f"<td style='width:30%'><div class='pos-bar'>{bar}</div></td>"
+                 f"{shares}<td style='font-size:9px'>{top}</td></tr>")
+    heads = "".join(f"<th>{c}</th>" for c in used)
+    return ('<div><h3 class="section-label">Starting points by position, this period</h3>'
+            f'<div class="pos-legend">{legend}</div>'
+            '<table class="stats-table"><tr><th>Team</th><th>Pts</th><th>Mix</th>'
+            f'{heads}<th>Top scorer (share)</th></tr>{rows}</table>'
+            '<p class="chart-caption" style="margin-top:5px">Starters only. A high top-scorer '
+            'share means one player is carrying the team; lose him and the team goes with him.</p>'
+            '</div>')
+
+
+def _has_regrades(ctx):
+    return bool(ctx.get("trade_regrades"))
+
+
+def _render_regrades(ctx: dict) -> str:
+    season = ctx["season"]
+    rows = ""
+    for t in ctx.get("trade_regrades") or []:
+        def side(s):
+            got = ", ".join(s["received_players"][:3])
+            if len(s["received_players"]) > 3:
+                got += f" +{len(s['received_players']) - 3} more"
+            if s["received_picks"]:
+                got += (" + " if got else "") + ", ".join(s["received_picks"][:3])
+            return (f"<strong>{_esc(season.team_name(s['roster_id']))}</strong> got "
+                    f"{_esc(got or 'nothing')}<br><span style='color:#7a8aa3'>"
+                    f"{s['pts_then']:.1f} pts then &rarr; {s['pts_now']:.1f} now</span>")
+        a, b = t["sides"][0], t["sides"][1]
+        def verdict(rid):
+            return _esc(season.team_name(rid)) if rid else "Even"
+        flip = '<span class="chip shame">Verdict flipped</span>' if t["flipped"] else ""
+        picks = " *" if t.get("has_picks") else ""
+        rows += (f"<tr><td class='num'>Wk {t['week']}{picks}</td>"
+                 f"<td style='font-size:9px'>{side(a)}</td><td style='font-size:9px'>{side(b)}</td>"
+                 f"<td style='font-size:9px'>{verdict(t['winner_then'])}</td>"
+                 f"<td style='font-size:9px'><strong>{verdict(t['winner_now'])}</strong> {flip}</td></tr>")
+    return ('<div><h3 class="section-label">Last month\'s trades, judged again</h3>'
+            '<table class="stats-table"><tr><th>Week</th><th>Side A</th><th>Side B</th>'
+            '<th>Winner then</th><th>Winner now</th></tr>'
+            f'{rows}</table>'
+            '<p class="chart-caption" style="margin-top:5px">Points scored for the new team by the '
+            'players each side received: at the end of last month, and now. * includes draft picks, '
+            'which are not valued here.</p></div>')
+
+
+def _has_preview(ctx):
+    return bool((ctx.get("next_month") or {}).get("weeks"))
+
+
+def _render_preview(ctx: dict) -> str:
+    season, nm = ctx["season"], ctx.get("next_month") or {}
+    cards = ""
+    for wk in nm["weeks"]:
+        games = ""
+        for g in wk["games"]:
+            pa = g["p_a"] * 100
+            games += (f'<div class="fixture"><div class="fx-names">'
+                      f'<span>{_esc(season.team_name(g["a"]))}</span>'
+                      f'<span>{_esc(season.team_name(g["b"]))}</span></div>'
+                      f'<div class="fx-bar"><span class="fx-a" style="width:{pa:.0f}%">{pa:.0f}%</span>'
+                      f'<span class="fx-b" style="width:{100 - pa:.0f}%">{100 - pa:.0f}%</span></div></div>')
+        cards += (f'<div class="chart-wrap"><h4>Week {wk["week"]}</h4>{games}</div>')
+    return (f'<p class="chart-caption" style="margin-bottom:8px">{_esc(nm["label"])} fixtures, '
+            'closest games first. Win chances come from current Elo ratings: a guide to who is '
+            'favoured, not a promise.</p>'
+            f'<div class="preview-grid">{cards}</div>')
+
+
 @dataclass
 class Section:
     id: str
@@ -2376,7 +2550,12 @@ MONTHLY_SECTIONS: list[Section] = [
     Section("standings",   "Standings",              _render_standings_monthly),
     Section("power-luck",  "Power, Luck & Form",     _render_power_luck,       when=_has_profiles),
     Section("elo",         "Elo Trajectory",         _render_elo_chart,        when=_has_elo_chart),
+    Section("leaderboard", "Fame, Shame & the Playoff Race", _render_leaderboard_page,
+            when=_has_leaderboard_page),
+    Section("positions",   "Where the Points Come From", _render_positions,    when=_has_positions),
     Section("profiles",    "Manager Profiles",       _render_manager_profiles, when=_has_profiles),
+    Section("regrades",    "Trade Re-Grades",        _render_regrades,         when=_has_regrades),
+    Section("preview",     "Next Month Preview",     _render_preview,          when=_has_preview),
     Section("charts",      "Charts",                 _render_charts,           when=_has_charts),
     Section("analytics",   "Season Analysis",        _render_season_analytics),
     Section("appendix",    "Appendix: New Analytics", _render_appendix, when=_has_appendix),
@@ -2389,6 +2568,9 @@ SEASON_SECTIONS: list[Section] = [
     Section("standings",   "Standings",              _render_standings_monthly),
     Section("power-luck",  "Power, Luck & Form",     _render_power_luck,       when=_has_profiles),
     Section("elo",         "Elo Trajectory",         _render_elo_chart,        when=_has_elo_chart),
+    Section("leaderboard", "Fame & Shame: Final Tally", _render_leaderboard_page,
+            when=_has_leaderboard_page),
+    Section("positions",   "Where the Points Came From", _render_positions,    when=_has_positions),
     Section("profiles",    "Manager Profiles",       _render_manager_profiles, when=_has_profiles),
     Section("charts",      "Charts",                 _render_charts,           when=_has_charts),
     Section("analytics",   "Season Analysis",        _render_season_analytics),
@@ -2770,6 +2952,26 @@ def render_pdf_html(season, awards, roasts, period_label,
         profiles = {}
     profile_specs = _profile_radar_specs(season, profiles) if profiles else []
     elo_spec = _elo_chart_spec(season, profiles) if profiles else None
+
+    from . import insights as IN
+
+    def _safe(label, fn, default):
+        try:
+            return fn()
+        except Exception as exc:
+            print(f"  [pdf_render] {label} skipped: {exc}")
+            return default
+
+    tally = _safe("Fame/shame leaderboard", lambda: IN.award_leaderboard(
+        season, last_week, current_weeks=weeks if kind != "season" else None,
+        current_awards=awards if kind != "season" else None), {})
+    positions = _safe("Points by position", lambda: IN.points_by_position(season, weeks), {})
+    movers = regrades = preview = None
+    if kind != "season":
+        movers = _safe("Playoff movers", lambda: IN.playoff_movers(
+            season, weeks, last_week, end_odds=playoff_odds), {})
+        regrades = _safe("Trade re-grades", lambda: IN.trade_regrades(season, weeks, last_week), [])
+        preview = _safe("Next month preview", lambda: IN.next_month_preview(season, weeks, last_week), {})
     ctx = {
         "season": season, "awards": awards, "roasts": roasts,
         "period_label": period_label, "kind": kind,
@@ -2783,6 +2985,11 @@ def render_pdf_html(season, awards, roasts, period_label,
         # pages via _render_appendix rather than through _render_charts.
         "profiles": profiles,
         "elo_chart_spec": elo_spec,
+        "award_tally": tally,
+        "position_points": positions,
+        "playoff_movers": movers,
+        "trade_regrades": regrades,
+        "next_month": preview,
         "recap": recap,
         "chart_specs": specs + appendix_specs + profile_specs + ([elo_spec] if elo_spec else []),
     }
